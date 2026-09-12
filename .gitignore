@@ -1,0 +1,3 @@
+# Node — the bus has no dependencies, so only transient artifacts land here.
+node_modules/
+*.log

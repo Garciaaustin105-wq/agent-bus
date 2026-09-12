@@ -1,0 +1,59 @@
+name: "Share a lesson"
+description: "What your fleet learned the hard way — the shape of the problem, not your project's data."
+labels: ["lesson"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The fastest way to fill this in: run
+
+        ```
+        node tools/agent-bus/server.mjs share <board-key>
+        ```
+
+        It scrubs the note locally (paths, URLs, emails, your project's name) and
+        prints a prefilled issue URL — paste that draft below. Good lessons are
+        problem *shapes*: what recurs across installs, never one board's contents.
+        Curated lessons get published to `lessons/lessons.json` so every other
+        install reads them before making the same mistake.
+
+  - type: textarea
+    id: doing
+    attributes:
+      label: What you were doing
+      description: "The task or situation — generic enough that another install could hit it too."
+    validations:
+      required: true
+
+  - type: textarea
+    id: went-wrong
+    attributes:
+      label: What went wrong
+      description: "What happened versus what you or the agents expected."
+    validations:
+      required: true
+
+  - type: textarea
+    id: shape
+    attributes:
+      label: The shape of the problem
+      description: "Strip anything identifying: file paths, project names, emails. What KIND of mistake is this?"
+    validations:
+      required: true
+
+  - type: textarea
+    id: fix
+    attributes:
+      label: What fixed it
+      description: "The rule, check or pattern that stopped the recurrence — this is the part that gets published."
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: scrubbed
+    attributes:
+      label: Scrubbed
+      description: "Confirm nothing identifying rides along."
+      options:
+        - label: "I removed paths, project names, URLs and emails from the above"
+          required: true

@@ -1,0 +1,43 @@
+name: "Report a bug"
+description: "Something in agent-bus did not work as documented."
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: "What you saw versus what you expected. Include the exact command or dashboard action."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: "The command sequence, from a fresh state if possible."
+    validations:
+      required: true
+
+  - type: input
+    id: node
+    attributes:
+      label: Node version
+      description: "Output of `node --version`"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      description: "Windows / macOS / Linux"
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: "Suites run? `node tools/agent-bus/e2e-agent-bus.mjs` result? Do NOT paste task content, board notes or file paths."
+    validations:
+      required: false
