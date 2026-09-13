@@ -465,7 +465,7 @@ await check("a done task carries a review form; a review lands; the self-review 
   assert.equal(st3.tasks.find((x) => x.id === t.id).reviews.length, 1, "and nothing was recorded");
 });
 
-await check("the savings counter renders total and this-session from RECORDED usage", async () => {
+await check("the savings counter prices CLOUD-EQUIVALENT work from RECORDED usage", async () => {
   const stPath = path.join(stateDir, "state.json");
   const seed = JSON.parse(fs.readFileSync(stPath, "utf8"));
   seed.taskSeq = (seed.taskSeq ?? 0) + 1;
@@ -475,13 +475,14 @@ await check("the savings counter renders total and this-session from RECORDED us
     usage: { prompt: 1200, output: 800 },
   });
   fs.writeFileSync(stPath, JSON.stringify(seed, null, 2));
-  const expected = seed.tasks.reduce(
-    (a, t) => a + (t.usage ? (t.usage.prompt || 0) + (t.usage.output || 0) : 0), 0);
+  const prompt = seed.tasks.reduce((a, t) => a + (t.usage?.prompt || 0), 0);
+  const output = seed.tasks.reduce((a, t) => a + (t.usage?.output || 0), 0);
+  const dollars = ((prompt * 3 + output * 15) / 1e6).toFixed(2);
   const html = await (await GET(`${base}/`)).text();
-  assert.ok(html.includes("Saved tokens"), "the panel renders");
-  assert.ok(html.includes(expected.toLocaleString()), `the total counts recorded usage (${expected})`);
+  assert.ok(html.includes("Cost savings"), "the panel renders");
+  assert.ok(html.includes(`≈ $${dollars}`), `the estimate prices recorded usage at the stated rates (expected ≈ $${dollars})`);
   assert.ok(html.includes("This session:"), "the session line renders");
-  assert.ok(html.includes("measured, not estimated"), "the counter says where its numbers come from");
+  assert.ok(html.includes("AGGREGATE estimate at a stated rate"), "the dollars say they are an estimate, the tokens say they are measured");
 });
 
 await check("a RUNNING task shows beside the tree lock even when the tree is free", async () => {

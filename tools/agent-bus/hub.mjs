@@ -482,28 +482,35 @@ setInterval(async () => {
 }, 4000);
 </script>`;
 
-// The savings counter. Every local task records exact usage {prompt, output}
-// from the model server, so the counter is a SUM OVER MEASURED FACTS: tokens
-// that ran on this machine's own model, billed $0, instead of a cloud
-// session. It stays in tokens on purpose — the bus never invents a per-task
-// counterfactual "what it would have cost in the cloud", because it cannot be
-// exact. The hub's context-cost view above is the cloud side (transcript
-// transcripts), and the two kinds are never summed.
+// The savings counter, in the only units a person cares about: DOLLARS A
+// CLOUD-BASED AGENT WOULD HAVE BILLED. Every local task records exact usage
+// {prompt, output} from the model server; those are the measured facts. The
+// estimate prices those same token counts at Sonnet-class cloud rates — an
+// AGGREGATE ONLY, at a stated rate, never a per-task claim (a per-task
+// counterfactual is inexact by construction, and the rule stands). The
+// context-cost view above stays the cloud side — what cloud sessions actually
+// burned — and the measured and estimated kinds are never summed.
+const CLOUD_RATE = { prompt: 3, output: 15 }; // $ per million tokens, Sonnet-class
 function savingsOf(state, sinceMs) {
   const sum = (tasks) => {
-    let tokens = 0, n = 0;
+    let prompt = 0, output = 0, n = 0;
     for (const t of tasks) {
       const u = t && t.usage;
       if (!u) continue;
-      const v = Number(u.prompt ?? 0) + Number(u.output ?? 0);
-      if (!Number.isFinite(v) || v <= 0) continue;
-      tokens += v;
+      const p = Number(u.prompt ?? 0), o = Number(u.output ?? 0);
+      if (!Number.isFinite(p) || !Number.isFinite(o) || p + o <= 0) continue;
+      prompt += p;
+      output += o;
       n++;
     }
-    return { tokens, n };
+    return { prompt, output, n };
   };
   const all = state.tasks ?? [];
-  return { total: sum(all), session: sum(all.filter((t) => Date.parse(t.doneAt || t.at || 0) >= sinceMs)) };
+  const price = (s) =>
+    ((s.prompt * CLOUD_RATE.prompt + s.output * CLOUD_RATE.output) / 1e6);
+  const total = sum(all);
+  const session = sum(all.filter((t) => Date.parse(t.doneAt || t.at || 0) >= sinceMs));
+  return { total, session, saved: price(total), savedSession: price(session) };
 }
 
 function renderStatusHtml(state, opts = {}) {
@@ -1010,16 +1017,19 @@ ${hardwareHtml()}
 <h2>The context budget</h2>
 ${costHtml}
 
-<h2>Saved tokens — work that ran locally, billed $0</h2>
+<h2>Cost savings — work a cloud-based agent never billed</h2>
 <div class="card">
-  <div style="font-size:21px"><b>${savings.total.tokens.toLocaleString()}</b>
-    <span class="mut">tokens over ${savings.total.n} local task${savings.total.n === 1 ? "" : "s"} — all time</span></div>
-  <div style="padding-top:6px">This session: <b>${savings.session.tokens.toLocaleString()}</b>
-    <span class="mut">tokens over ${savings.session.n} task${savings.session.n === 1 ? "" : "s"}, since the hub started</span></div>
-  <p class="mut">Counted from the exact usage each local task records from the
-    model server — measured, not estimated. The context budget above is the
-    cloud side; the two are never summed, and the bus does not invent a
-    per-task "would have cost" number.</p>
+  <div style="font-size:24px">saved so far: <b>≈ $${savings.saved.toFixed(2)}</b></div>
+  <div class="mut" style="padding-top:2px">that is ${savings.total.prompt.toLocaleString()} input +
+    ${savings.total.output.toLocaleString()} output tokens over ${savings.total.n} task${savings.total.n === 1 ? "" : "s"} that ran on your own model, billed $0 — all time</div>
+  <div style="padding-top:6px">This session: <b>≈ $${savings.savedSession.toFixed(2)}</b>
+    <span class="mut">— ${(savings.session.prompt + savings.session.output).toLocaleString()} tokens over ${savings.session.n} task${savings.session.n === 1 ? "" : "s"}, since the hub started</span></div>
+  <p class="mut">The token counts are measured exactly from each task's usage
+    record. The dollars are an AGGREGATE estimate at a stated rate —
+    Sonnet-class cloud pricing, $${CLOUD_RATE.prompt}/M input and
+    $${CLOUD_RATE.output}/M output — never a per-task claim. The context
+    budget above is the other side (what cloud sessions actually burned);
+    measured and estimated are never summed.</p>
 </div>`
     : `<div class="card">
   <b>Shared with every space — not copied here</b>
