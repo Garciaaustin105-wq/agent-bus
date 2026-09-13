@@ -206,6 +206,179 @@ function settle(parsed, report) {
   };
 }
 
+// ── duty 2: review first-pass ───────────────────────────────────────────────
+
+// The t19/t20/t21 class: a runner reports its task DONE and the draft looks
+// done in every surface — same weight as a good one — until someone actually
+// reads it and finds it truncated, looping, or off-brief. The first-pass is
+// the steward reading every finished result against its brief BEFORE anyone
+// trusts it, filing a PROPOSAL on the task: `task.firstPass`. It is never the
+// verdict — the orchestrator's stamped review (or the human's) stays the
+// verdict, and `task.reviews` stays exactly what the review verb wrote.
+//
+// Verdict vocabulary is deliberately not approve/changes: a first-pass is a
+// weaker claim than a review. "pass" = reads complete and on-brief (advisory
+// only); "concerns" = concrete reasons the draft may not be usable;
+// "unreviewable" = the result is so empty or degenerate that even reading it
+// found nothing to judge — which is itself the finding. Marked done by
+// `firstPass` existing on the task; no separate ledger can drift from it.
+
+const FIRST_PASS_MAX = 10;
+
+export function reviewSignalsFor(state) {
+  return (state.tasks ?? [])
+    .filter((t) => t.status === "done")
+    .filter((t) => !t.firstPass)
+    .filter((t) => !(t.reviews ?? []).length) // an orchestrator verdict makes a first-pass pointless
+    .map((t) => ({
+      id: `review:${t.id}`,
+      taskId: t.id,
+      title: t.title ?? t.id,
+      prompt: t.prompt ?? "",
+      result: t.result ?? "",
+    }))
+    .slice(0, FIRST_PASS_MAX);
+}
+
+// The two failure shapes the loop found in its own fleet, caught mechanically
+// — no model spend, no model excuses. A finished task whose result is empty is
+// not a pass; a result with a line stamped eight or more times is the
+// repetition loop t21 died in (socket.onmessage × 25). Either is a concern
+// with a mechanical reason; the model still runs after them only if neither
+// fired. Returns null when the mechanical gate is silent.
+export function mechanicalConcern(task) {
+  if (!String(task.result ?? "").trim()) {
+    return "finished with an empty result — nothing was produced to review";
+  }
+  const counts = new Map();
+  for (const line of String(task.result).split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.length < 30) continue;
+    counts.set(trimmed, (counts.get(trimmed) ?? 0) + 1);
+  }
+  for (const [line, n] of counts) {
+    if (n >= 8) {
+      return `repetition loop: the same line appears ${n} times ("${line.slice(0, 60)}…")`;
+    }
+  }
+  return null;
+}
+
+// The strict prompt for the first-pass reader. The TAIL of the result rides
+// with the head: a truncated draft looks fine from the front and dies
+// mid-line at the back, which is exactly how t21 shipped.
+export function reviewPrompt(signal) {
+  const result = String(signal.result ?? "");
+  const head = result.slice(0, 3000);
+  const tail = result.length > 4500 ? result.slice(-1500) : "";
+  const middle = result.length > 4500
+    ? `\n… (${result.length - head.length - tail.length} middle characters cut) …\n`
+    : "";
+  return [
+    "You are the first-pass reviewer of a finished agent task. Read the draft against its brief and reply with ONLY a JSON object, no prose:",
+    '{"verdict":"pass|concerns","reason":"<one sentence>"}',
+    '"pass" = the draft reads complete and on-brief (a first-pass, not a verdict).',
+    '"concerns" = something is missing, off-brief, truncated or broken — name it in reason.',
+    "",
+    "BRIEF:",
+    String(signal.prompt ?? "").slice(0, 2000),
+    "",
+    "DRAFT:",
+    head + middle + tail,
+  ].join("\n");
+}
+
+// Parse the reader's reply to a VALUE or { error }. Same discipline as
+// parseTriage: fences tolerated, shape enforced.
+export function parseReview(text) {
+  if (typeof text !== "string") return { error: "reader returned no text" };
+  let t = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "");
+  const first = t.indexOf("{");
+  const last = t.lastIndexOf("}");
+  if (first === -1 || last <= first) return { error: "no JSON object in the reply" };
+  let obj;
+  try {
+    obj = JSON.parse(t.slice(first, last + 1));
+  } catch {
+    return { error: "reply is not valid JSON" };
+  }
+  const VERDICTS = ["pass", "concerns"];
+  if (!VERDICTS.includes(obj.verdict)) {
+    return { error: `unknown verdict ${JSON.stringify(obj.verdict)}` };
+  }
+  if (typeof obj.reason !== "string" || !obj.reason.trim()) {
+    return { error: "verdict without a reason" };
+  }
+  return { verdict: obj.verdict, reason: obj.reason.trim() };
+}
+
+// One finished task, one first-pass decision. Mechanical gate first; then the
+// reader; then parse. Garbage degrades to "unreviewable" — recorded with what
+// happened, marked once, never silently skipped.
+export async function reviewTask(signal, classify) {
+  const unreviewable = (reason) => ({ verdict: "unreviewable", reason });
+  const mechanical = mechanicalConcern(signal);
+  if (mechanical) return { verdict: "concerns", reason: mechanical };
+  // Transport failure is NOT caught here — it is the TICK's path (one offline
+  // note, nothing stamped, retry); a verdict of "unreviewable" is for garbage
+  // the runner actually produced.
+  const raw = await classify(signal);
+  const parsed = parseReview(raw);
+  if (parsed.error) return unreviewable(`reader returned an unusable answer (${parsed.error})`);
+  return parsed;
+}
+
+// The review tick: read the state, first-pass every finished task that has no
+// first-pass and no orchestrator verdict yet, stamp `task.firstPass`.
+// Transport failure = the same ONE offline note, nothing stamped, retry later.
+export async function runStewardReviewTick({ readState, writeState, ask, maxSignals = FIRST_PASS_MAX }) {
+  const state = readState();
+  const signals = reviewSignalsFor(state).slice(0, maxSignals);
+  if (!signals.length) return { reviewed: 0 };
+
+  let reviewed = 0;
+  for (const signal of signals) {
+    // The mechanical gate runs BEFORE the ask — an empty or looping draft is
+    // settled without a single model token. reviewTask re-checks it (same
+    // pure function) for callers that arrive here some other way.
+    const mechanical = mechanicalConcern(signal);
+    let answer = mechanical ? null : undefined;
+    if (!mechanical) {
+      try {
+        answer = await ask(reviewPrompt(signal));
+      } catch (err) {
+        writeState((s) => {
+          s.board ??= {};
+          s.board["steward/offline"] = {
+            value: `Steward could not reach the local runner for review first-pass (${err?.message ?? String(err)}). Finished tasks stay un-first-passed and will retry — nothing was lost.`,
+            by: "steward",
+            at: new Date().toISOString(),
+          };
+        });
+        return { reviewed, offline: true };
+      }
+    }
+    const decision = mechanical
+      ? { verdict: "concerns", reason: mechanical }
+      : await reviewTask(signal, async () => answer);
+    writeState((s) => {
+      s.tasks ??= [];
+      const task = s.tasks.find((t) => t.id === signal.taskId);
+      if (!task || task.firstPass) return; // claimed between read and write
+      task.firstPass = {
+        verdict: decision.verdict,
+        reason: decision.reason,
+        by: "steward",
+        at: new Date().toISOString(),
+      };
+      s.steward ??= {};
+      s.steward.lastReviewTick = new Date().toISOString();
+    });
+    reviewed++;
+  }
+  return { reviewed };
+}
+
 // The tick: read the state, triage every un-filed signal, write the triage
 // notes, mark them triaged. Adapters are injected so the harness runs this
 // against an in-memory store; the hub passes withState-backed ones.

@@ -10,6 +10,12 @@
  */
 import assert from "node:assert/strict";
 import {
+  mechanicalConcern,
+  parseReview,
+  reviewPrompt,
+  reviewSignalsFor,
+  reviewTask,
+  runStewardReviewTick,
   parseTriage,
   runStewardTick,
   signalsFor,
@@ -261,6 +267,132 @@ await check("runStewardTick: transport failure files ONE offline note, marks not
   assert.ok(state.board["steward/offline"], "the one upserted note");
   assert.equal((state.steward.triaged ?? []).length, 0, "nothing marked done");
   assert.equal(signalsFor(state, state.steward.triaged ?? []).length, 2, "signals remain retryable");
+});
+
+// ── duty 2: review first-pass ───────────────────────────────────────────────
+
+const loopLines = Array.from({ length: 25 }, () => "socket.onmessage = function (event) { handleFrame(event.data); };").join("\n");
+
+await check("reviewSignalsFor: picks finished tasks without a first-pass or a verdict", () => {
+  const state = stateWith({}, [
+    { id: "t1", status: "done", title: "draft a", prompt: "p", result: "r" },
+    { id: "t2", status: "done", title: "draft b", prompt: "p", result: "r", firstPass: { verdict: "pass" } },
+    { id: "t3", status: "done", title: "draft c", prompt: "p", result: "r", reviews: [{ verdict: "approve", by: "orchestrator" }] },
+    { id: "t4", status: "running", title: "in flight" },
+    { id: "t5", status: "failed", title: "triage's signal, not review's" },
+  ]);
+  const s = reviewSignalsFor(state);
+  assert.deepEqual(s.map((x) => x.taskId), ["t1"],
+    "done + no firstPass + no orchestrator verdict — exactly that set");
+});
+
+await check("reviewSignalsFor: caps at 10", () => {
+  const state = stateWith({}, Array.from({ length: 25 }, (_, i) => ({
+    id: `t${i}`, status: "done", title: `d${i}`, prompt: "p", result: "r",
+  })));
+  assert.equal(reviewSignalsFor(state).length, 10);
+});
+
+await check("mechanicalConcern: empty result and repetition loops need no model", () => {
+  assert.match(mechanicalConcern({ result: "  " }), /empty result/);
+  const looped = `header line\n${loopLines}`;
+  assert.match(mechanicalConcern({ result: looped }), /repetition loop/);
+  assert.equal(mechanicalConcern({ result: "const a = 1;\nconst b = 2;\n".repeat(10) }), null,
+    "repeated SHORT lines are normal code, not a loop");
+  assert.equal(mechanicalConcern({ result: "one fine line of code\n".repeat(8) }), null,
+    "a repeated 22-char line is under the loop threshold");
+});
+
+await check("reviewTask: the model's pass and concerns land verbatim", async () => {
+  const pass = await reviewTask({ prompt: "p", result: "good code" }, async () =>
+    '{"verdict":"pass","reason":"complete and on-brief"}');
+  assert.deepEqual(pass, { verdict: "pass", reason: "complete and on-brief" });
+  const concern = await reviewTask({ prompt: "p", result: "partial" }, async () =>
+    '{"verdict":"concerns","reason":"missing the export handler the brief names"}');
+  assert.equal(concern.verdict, "concerns");
+});
+
+await check("reviewTask: garbage reader answers degrade to unreviewable", async () => {
+  for (const bad of ["Let me explain at length why this draft is fine", '{"verdict":"perfect"}', "```json\n{broken\n```"]) {
+    const d = await reviewTask({ prompt: "p", result: "r" }, async () => bad);
+    assert.equal(d.verdict, "unreviewable", bad.slice(0, 30));
+    assert.match(d.reason, /unusable answer/);
+  }
+});
+
+await check("parseReview: fences tolerated, shape enforced", () => {
+  assert.deepEqual(parseReview('```json\n{"verdict":"concerns","reason":"r"}\n```'), {
+    verdict: "concerns",
+    reason: "r",
+  });
+  for (const bad of ["no json", '{"verdict":"approve"}', '{"verdict":"pass"}'])
+    assert.ok(parseReview(bad).error, `enforced: ${bad}`);
+});
+
+await check("reviewPrompt: brief rides whole, draft rides head AND tail", () => {
+  const p = reviewPrompt({
+    prompt: "write the index page per spec section 2",
+    result: "a".repeat(5000) + "truncated-mid-line here",
+  });
+  assert.match(p, /index page per spec section 2/);
+  assert.match(p, /truncated-mid-line here/, "the TAIL is where truncation shows");
+  assert.match(p, /middle characters cut/);
+  assert.match(p, /ONLY a JSON object/);
+});
+
+await check("runStewardReviewTick: first-passes every signal, stamps provenance, second tick is a no-op", async () => {
+  const state = stateWith({}, [
+    { id: "t1", status: "done", title: "d1", prompt: "p1", result: "result one" },
+    { id: "t2", status: "done", title: "d2", prompt: "p2", result: "result two" },
+  ]);
+  const res = await runStewardReviewTick({
+    readState: () => state,
+    writeState: (fn) => fn(state),
+    ask: async () => '{"verdict":"pass","reason":"reads complete"}',
+  });
+  assert.equal(res.reviewed, 2);
+  assert.equal(state.tasks[0].firstPass.by, "steward");
+  assert.match(state.tasks[0].firstPass.reason, /reads complete/);
+  const again = await runStewardReviewTick({
+    readState: () => state,
+    writeState: (fn) => fn(state),
+    ask: async () => { throw new Error("should not be asked again"); },
+  });
+  assert.equal(again.reviewed, 0, "firstPass on the task is the done-marker");
+});
+
+await check("runStewardReviewTick: transport failure files ONE offline note, stamps nothing, retries", async () => {
+  const state = stateWith({}, [
+    { id: "t1", status: "done", title: "d1", prompt: "p", result: "r" },
+    { id: "t2", status: "done", title: "d2", prompt: "p", result: "r" },
+  ]);
+  let attempts = 0;
+  const res = await runStewardReviewTick({
+    readState: () => state,
+    writeState: (fn) => fn(state),
+    ask: async () => { attempts++; throw new Error("connection refused"); },
+  });
+  assert.equal(res.offline, true);
+  assert.equal(attempts, 1);
+  assert.ok(state.board["steward/offline"]);
+  assert.equal(state.tasks.filter((t) => t.firstPass).length, 0);
+  assert.equal(reviewSignalsFor(state).length, 2, "signals remain retryable");
+});
+
+await check("runStewardReviewTick: the mechanical gate runs without model spend", async () => {
+  const state = stateWith({}, [
+    { id: "t1", status: "done", title: "d1", prompt: "p", result: "" },
+    { id: "t2", status: "done", title: "d2", prompt: "p", result: loopLines },
+  ]);
+  let called = 0;
+  const res = await runStewardReviewTick({
+    readState: () => state,
+    writeState: (fn) => fn(state),
+    ask: async () => { called++; return '{"verdict":"pass","reason":"r"}'; },
+  });
+  assert.equal(called, 0, "both failures are mechanical — the model is never asked");
+  assert.match(state.tasks[0].firstPass.reason, /empty result/);
+  assert.match(state.tasks[1].firstPass.reason, /repetition loop/);
 });
 
 summary();

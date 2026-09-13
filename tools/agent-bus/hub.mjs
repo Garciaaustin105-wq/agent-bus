@@ -44,7 +44,7 @@ import {
   withState,
 } from "./server.mjs";
 import { readRegistry, resolveProject } from "./projects.mjs";
-import { runStewardTick } from "./steward.mjs";
+import { runStewardTick, runStewardReviewTick } from "./steward.mjs";
 
 const STATE = path.join(DIR, "state.json");
 // Lives beside the state, not in the repo tree: it is generated, per-machine,
@@ -1262,6 +1262,13 @@ ${flash ? `<div class="flash">${esc(flash)}</div>` : ""}
 ${result}
 
 <h2>Reviews (${(task.reviews ?? []).length})</h2>
+${task.firstPass
+  ? `<div class="msg"><b>${task.firstPass.verdict === "pass" ? '<span class="ok">first-pass: pass</span>' : task.firstPass.verdict === "concerns" ? '<span class="warn">first-pass: concerns</span>' : '<span class="warn">first-pass: unreviewable</span>'}</b>
+      <span class="mut">by ${esc(task.firstPass.by)} · ${esc(ago(task.firstPass.at))} · a proposal, NOT the verdict</span>
+      <p class="msgtext">${esc(task.firstPass.reason)}</p></div>`
+  : task.status === "done" && !(task.reviews ?? []).length
+    ? `<p class="mut">No first-pass yet — the steward reads every finished draft against its brief on its next tick.</p>`
+    : ""}
 ${reviews || `<p class="mut">No reviews yet. Review is someone else's read of the work — the runner who did it cannot record one.</p>`}
 ${reviewForm}
 
@@ -1681,20 +1688,23 @@ function runDashboard(port) {
     refreshPage(true);
     fs.watchFile(STATE, { interval: 1000 }, () => refreshPage());
 
-    // THE STEWARD — duty 1 (triage). A problem note under defect/|problem/|audit/
-    // or a task that FAILED is a signal the steward owes a triage to: a filed
-    // steward-triage- note (defect / lesson / routing-fact / duplicate / unclear)
-    // with provenance and the human-verdict gate still in front of it. The policy
-    // lives in steward.mjs, proven by steward-harness without a model; this loop
-    // is only the wiring — read, ask, write. C4 holds: the steward files, it
-    // never opens tasks, edits rules or touches another agent's note.
+    // THE STEWARD — duty 1 (triage) + duty 2 (review first-pass). A problem note
+    // under defect/|problem/|audit/ or a task that FAILED is a signal the steward
+    // owes a triage to: a filed steward-triage- note with provenance and the
+    // human-verdict gate still in front of it. A task that finished without a
+    // first-pass and without an orchestrator verdict gets one: task.firstPass =
+    // pass | concerns | unreviewable — a PROPOSAL, never the verdict; the
+    // stamped review stays the verdict. The policy lives in steward.mjs, proven
+    // by steward-harness without a model; this loop is only the wiring — read,
+    // ask, write. C4 holds: the steward files, it never opens tasks, edits rules
+    // or touches another agent's note.
     //
-    // The runner is the local fleet's default, overridable; with no enabled
-    // runner the loop is a no-op and the bus is exactly what it was before —
-    // the same absence-changes-nothing rule the Ollama integration has kept.
-    // One tick at a time: a slow model must not stack ticks. A tick that dies
-    // is logged and the loop lives — the steward must not become a way to
-    // crash the dashboard.
+    // The runner is the local fleet's default, overridable (STEWARD_RUNNER, and
+    // STEWARD_REVIEW_RUNNER for the reader); with no enabled runner the loop is
+    // a no-op and the bus is exactly what it was before — the same
+    // absence-changes-nothing rule the Ollama integration has kept. One tick at
+    // a time: a slow model must not stack ticks. A tick that dies is logged and
+    // the loop lives — the steward must not become a way to crash the dashboard.
     const STEWARD_INTERVAL_MS = 60_000;
     let stewardBusy = false;
     const stewardTick = async () => {
@@ -1716,6 +1726,25 @@ function runDashboard(port) {
           process.stdout.write("steward: runner unreachable — signals stay un-triaged and will retry\n");
         else if (res.triaged)
           process.stdout.write(`steward: triaged ${res.triaged} signal(s)\n`);
+        // Duty 2, same loop. A reader that reads better than the triager is a
+        // runner entry away — this one only falls back to the same runner.
+        let reviewRunner = runner;
+        if (process.env.STEWARD_REVIEW_RUNNER) {
+          try {
+            reviewRunner = findRunner(process.env.STEWARD_REVIEW_RUNNER);
+          } catch {
+            /* fall back to the triage runner */
+          }
+        }
+        const rev = await runStewardReviewTick({
+          readState: () => withState((s) => s),
+          writeState: (fn) => withState(fn),
+          ask: (prompt) => askRunner(reviewRunner, prompt),
+        });
+        if (rev.offline)
+          process.stdout.write("steward: runner unreachable for review — finished tasks stay un-first-passed and will retry\n");
+        else if (rev.reviewed)
+          process.stdout.write(`steward: first-passed ${rev.reviewed} finished task(s)\n`);
       } catch (err) {
         process.stdout.write(`steward: tick failed: ${err?.message ?? err}\n`);
       } finally {
