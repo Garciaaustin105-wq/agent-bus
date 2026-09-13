@@ -538,6 +538,16 @@ await check("the sessions list shows every Claude session with what it burned �
       !savedLine.includes("2,350"),
       "burned is NEVER summed into saved — saved still counts local tasks only"
     );
+    // The chars-÷-4 attribution panels must say so out loud (user request
+    // request/label-approx-panels): approximate is labelled, exact stays exact.
+    assert.ok(
+      html.includes("Read into context — approximate"),
+      "the chars-div-4 panels are labelled approximate"
+    );
+    assert.ok(
+      html.includes("never summed into the exact"),
+      "and the note names what stays exact"
+    );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true }); // nothing of ours left behind
   }

@@ -934,7 +934,7 @@ function renderStatusHtml(state, opts = {}) {
   </div>
 
   <div class="card">
-    <b>Read into context</b>
+    <b>Read into context — approximate</b>
     <table class="tw">
       <tr><td>images / PDF</td><td class="num">${T.images.n}</td>
         <td class="num">${K(T.images.tok)}</td>
@@ -951,6 +951,9 @@ function renderStatusHtml(state, opts = {}) {
         : ""
     }
     ${offenders ? `<table class="tw">${offenders}</table>` : ""}
+    <p class="mut">Approximate: the bill does not itemize per file, so bodies here
+      are counted at chars ÷ 4 — a good estimate, never summed into the exact
+      counters in "Where it went", and never used to judge a session.</p>
   </div>
 </div>
 
