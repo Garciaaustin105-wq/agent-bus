@@ -447,6 +447,32 @@ const PAGE_CSS = `<style>
   a { color:var(--ok); }
 </style>`;
 
+// Self-refresh for the live pages. The desktop launcher opens the dashboard
+// in a Chrome/Edge --app window, which has no address bar and does not even
+// reload on F5 — a page like this would otherwise be frozen at whatever it
+// showed when the window opened. Instead of a blind meta refresh (which
+// discards scroll position and would yank a half-written form away), the
+// page watches itself: every few seconds it re-fetches its own URL and
+// compares the server's render marker. A new marker means new state worth
+// showing — but never while someone is typing or a form holds unsaved text;
+// being one render stale beats stealing the user's keystrokes.
+const REFRESH_META = (stamp) => `<meta name="hub-render" content="${stamp}">`;
+const REFRESH_JS = `<script>
+setInterval(async () => {
+  try {
+    const text = await (await fetch(location.href, { cache: "no-store" })).text();
+    const fresh = text.match(/hub-render" content="(\\d+)"/);
+    const shown = document.querySelector('meta[name="hub-render"]')?.content;
+    if (!fresh || !shown || fresh[1] === shown) return;
+    const el = document.activeElement;
+    const typing = el && ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName);
+    const dirty = [...document.querySelectorAll("input,textarea")]
+      .some((i) => i.value !== i.defaultValue);
+    if (!typing && !dirty) location.reload();
+  } catch {}
+}, 4000);
+</script>`;
+
 function renderStatusHtml(state, opts = {}) {
   const { flash = null, interactive = false } = opts;
   // §6 — which space this render belongs to. own (or unset) is the hub's own
@@ -905,7 +931,7 @@ from the desktop to run commands.</p>`;
   return `<!doctype html>
 <meta charset="utf-8"><title>Agent Bus — command hub</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-${interactive ? "" : '<meta http-equiv="refresh" content="5">'}
+${interactive ? REFRESH_META(Date.now()) + REFRESH_JS : '<meta http-equiv="refresh" content="5">'}
 ${PAGE_CSS}
 
 <div class="head">
@@ -1192,6 +1218,7 @@ function taskPageHtml(id, flash, proj) {
     return `<!doctype html>
 <meta charset="utf-8"><title>Agent Bus — ${esc(task.id)}</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
+${REFRESH_META(Date.now())}${REFRESH_JS}
 ${PAGE_CSS}
 
 <div class="head">

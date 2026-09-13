@@ -400,6 +400,26 @@ await check("a done task carries a review form; a review lands; the self-review 
   assert.equal(st3.tasks.find((x) => x.id === t.id).reviews.length, 1, "and nothing was recorded");
 });
 
+await check("live pages refresh themselves — the app window has no reload key", async () => {
+  const st = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+  const task = st.tasks[0];
+  const d1 = await (await GET(`${base}/`)).text();
+  assert.ok(d1.includes('meta name="hub-render"'), "the board carries a render marker");
+  assert.ok(d1.includes("setInterval"), "the board carries the watcher");
+  // two renders of the SAME page must carry different markers, or the watcher
+  // could never see a change and would never reload
+  const d2 = await (await GET(`${base}/`)).text();
+  const m1 = d1.match(/hub-render" content="(\d+)"/)[1];
+  const m2 = d2.match(/hub-render" content="(\d+)"/)[1];
+  assert.notEqual(m1, m2, "each render stamps its own marker");
+  const tp = await (await GET(`${base}/task/${task.id}`)).text();
+  assert.ok(tp.includes('meta name="hub-render"'), "task pages carry the marker too");
+  // the saved copy stays on its blind meta refresh — the watcher would only
+  // ever compare the file against itself
+  const saved = fs.readFileSync(path.join(HOME, ".git", "agent-bus", "status.html"), "utf8");
+  assert.ok(saved.includes('http-equiv="refresh"') && !saved.includes("setInterval"), "saved copy untouched");
+});
+
 // Kill, then give the hub a beat to release its fs.watchFile before the tree
 // under it disappears — kill+rmSync in the same tick trips a libuv assertion
 // on Windows (uv_handle_closing) and the process dies 127 after reporting
