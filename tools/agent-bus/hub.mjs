@@ -44,7 +44,7 @@ import {
   withState,
 } from "./server.mjs";
 import { readRegistry, resolveProject } from "./projects.mjs";
-import { runStewardTick, runStewardReviewTick } from "./steward.mjs";
+import { runStewardTick, runStewardReviewTick, runStewardBriefTick } from "./steward.mjs";
 
 const STATE = path.join(DIR, "state.json");
 // Lives beside the state, not in the repo tree: it is generated, per-machine,
@@ -1228,16 +1228,18 @@ function taskPageHtml(id, flash, proj) {
       )
       .join("");
     const reviewForm =
-      task.status === "done"
+      task.status === "done" || task.status === "draft"
         ? `<form method="post" action="${esc(postUrl)}" class="card">
       <input type="hidden" name="action" value="review">
       <input type="hidden" name="task_id" value="${esc(task.id)}">
       <input type="hidden" name="back" value="${esc(postUrl)}">
-      <label class="mut">Your review — the worker cannot review its own task</label>
+      <label class="mut">${task.status === "draft"
+        ? "This is the steward's DRAFT brief. Approving it dispatches the task to the queue; changes leaves it a draft with your notes on it."
+        : "Your review — the worker cannot review its own task"}</label>
       <div class="row">
-        <select name="verdict"><option value="approve">approve</option><option value="changes">changes</option></select>
+        <select name="verdict"><option value="approve">${task.status === "draft" ? "approve (dispatch)" : "approve"}</option><option value="changes">changes</option></select>
         <input type="text" name="notes" placeholder="notes (optional)" maxlength="2000">
-        <button type="submit">Record review</button>
+        <button type="submit">${task.status === "draft" ? "Approve & dispatch" : "Record review"}</button>
       </div>
     </form>`
         : "";
@@ -1745,6 +1747,26 @@ function runDashboard(port) {
           process.stdout.write("steward: runner unreachable for review — finished tasks stay un-first-passed and will retry\n");
         else if (rev.reviewed)
           process.stdout.write(`steward: first-passed ${rev.reviewed} finished task(s)\n`);
+        // Duty 3: draft a brief for every triaged defect, filed as a DRAFT task
+        // — dispatch is the orchestrator's approve, pre-dispatch. The steward
+        // never queues work itself (C4).
+        let briefRunner = runner;
+        if (process.env.STEWARD_BRIEF_RUNNER) {
+          try {
+            briefRunner = findRunner(process.env.STEWARD_BRIEF_RUNNER);
+          } catch {
+            /* fall back to the triage runner */
+          }
+        }
+        const brf = await runStewardBriefTick({
+          readState: () => withState((s) => s),
+          writeState: (fn) => withState(fn),
+          ask: (prompt) => askRunner(briefRunner, prompt),
+        });
+        if (brf.offline)
+          process.stdout.write("steward: runner unreachable for briefs — triaged defects stay brief-less and will retry\n");
+        else if (brf.drafted)
+          process.stdout.write(`steward: drafted ${brf.drafted} brief(s) (awaiting approval)\n`);
       } catch (err) {
         process.stdout.write(`steward: tick failed: ${err?.message ?? err}\n`);
       } finally {

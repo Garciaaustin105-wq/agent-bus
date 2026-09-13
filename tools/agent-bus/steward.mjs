@@ -379,6 +379,161 @@ export async function runStewardReviewTick({ readState, writeState, ask, maxSign
   return { reviewed };
 }
 
+// ── duty 3: brief drafting ──────────────────────────────────────────────────
+
+// A triaged defect needs a fix task — but the loop's own history is the proof
+// of what a rushed brief costs: t19/t20/t21 were dispatched on one-paragraph
+// briefs and the drafts came back truncated, looping, off-brief. So the
+// steward's third duty: for every defect triage, DRAFT a full brief — problem,
+// what a good fix must produce, guardrails — and file it as a task in status
+// "draft". A draft task is claimed by nobody (claimNextTask takes "queued"
+// only): dispatch is the orchestrator's approve, pre-dispatch, per the design.
+// The steward proposes the brief; it never dispatches.
+//
+// Marks live in `state.steward.briefed` (signal ids, capped) — a triaged
+// defect gets ONE draft, and an unusable draft is recorded under
+// `steward-brief-unusable-<slug>` with the reason rather than retried forever.
+
+const BRIEF_MAX = 5;
+const BRIEF_CHARS = 6000;
+
+export function briefSignalsFor(state) {
+  const defects = state.steward?.defects ?? [];
+  const briefed = new Set(state.steward?.briefed ?? []);
+  const drafted = new Set(
+    (state.tasks ?? []).map((t) => t.briefDraftFor).filter(Boolean)
+  );
+  const reports = new Map();
+  for (const [key, entry] of Object.entries(state.board ?? {})) {
+    if (PROBLEM_PREFIXES.some((p) => key.startsWith(p))) {
+      reports.set(`note:${key}`, {
+        key,
+        title: key,
+        value: entry?.value ?? "",
+      });
+    }
+  }
+  for (const t of state.tasks ?? []) {
+    if (t.status === "failed") {
+      reports.set(`task:${t.id}`, {
+        key: t.id,
+        title: t.title ?? t.id,
+        value: t.result ?? "",
+      });
+    }
+  }
+  return [...new Set(defects)]
+    .filter((id) => !briefed.has(id) && !drafted.has(id))
+    .filter((id) => reports.has(id))
+    .map((id) => ({ id, ...reports.get(id) }))
+    .slice(0, BRIEF_MAX);
+}
+
+// The strict prompt for the brief drafter. Free text IS the deliverable here —
+// the orchestrator reads and approves it — but the structure is demanded,
+// because the failure mode is a vague one-paragraph wish that a runner then
+// guesses at.
+export function briefPrompt(signal) {
+  return [
+    "You draft a task brief for a runner who will fix this defect. Reply with ONLY the brief text — no JSON, no preamble, no code fences.",
+    "The brief MUST have these four sections, each starting with its heading:",
+    "PROBLEM: the defect in one or two sentences, from the report.",
+    "MUST PRODUCE: what a good fix delivers — concrete, checkable statements (a runner's work is judged against these).",
+    "DO NOT: the guardrails — what the fix must not touch or change.",
+    "CONTEXT: anything the report names (files, pages, commands); if the report names none, say so.",
+    "",
+    "DEFECT REPORT:",
+    `key: ${signal.key}`,
+    `title: ${signal.title}`,
+    `value: ${String(signal.value ?? "").slice(0, 2000)}`,
+  ].join("\n");
+}
+
+// Parse the drafter's reply to a brief STRING or { error }. Not JSON — a
+// brief is prose — but not anything-goes either: fences stripped, a real
+// length demanded (a one-liner is a wish, not a brief), hard cap so a runaway
+// cannot ride into every state write.
+export function parseBrief(text) {
+  if (typeof text !== "string") return { error: "drafter returned no text" };
+  const t = text
+    .trim()
+    .replace(/^```(?:\w+)?\s*/i, "")
+    .replace(/```\s*$/, "")
+    .trim();
+  if (t.length < 200) return { error: `brief is too short to be a brief (${t.length} chars)` };
+  if (!/PROBLEM/i.test(t) || !/MUST PRODUCE/i.test(t)) {
+    return { error: "brief is missing its PROBLEM / MUST PRODUCE sections" };
+  }
+  return { brief: t.slice(0, BRIEF_CHARS) };
+}
+
+// The brief tick: read the state, draft a brief for every triaged defect
+// without one, file it as a DRAFT task. Transport failure = the same ONE
+// offline note, nothing marked, retry later. An unusable draft = ONE board
+// note with the reason, marked once — a bad brief is reported, not retried
+// into a token furnace.
+export async function runStewardBriefTick({ readState, writeState, ask, maxSignals = BRIEF_MAX }) {
+  const state = readState();
+  const signals = briefSignalsFor(state).slice(0, maxSignals);
+  if (!signals.length) return { drafted: 0 };
+
+  let drafted = 0;
+  for (const signal of signals) {
+    let answer;
+    try {
+      answer = await ask(briefPrompt(signal));
+    } catch (err) {
+      writeState((s) => {
+        s.board ??= {};
+        s.board["steward/offline"] = {
+          value: `Steward could not reach the local runner for brief drafting (${err?.message ?? String(err)}). Defects stay brief-less and will retry — nothing was lost.`,
+          by: "steward",
+          at: new Date().toISOString(),
+        };
+      });
+      return { drafted, offline: true };
+    }
+    const parsed = parseBrief(answer);
+    const slug = signal.id.replace(/[:/]/g, "-");
+    writeState((s) => {
+      s.steward ??= {};
+      s.steward.briefed ??= [];
+      if (parsed.brief) {
+        s.tasks ??= [];
+        // Same claim-check discipline as the review tick: a draft for this
+        // signal may exist by now; never a second one.
+        if (!s.tasks.some((t) => t.briefDraftFor === signal.id)) {
+          s.taskSeq = (s.taskSeq ?? 0) + 1;
+          s.tasks.push({
+            id: `t${s.taskSeq}`,
+            lane: "fixes",
+            title: `Brief draft: ${String(signal.title).slice(0, 160)}`,
+            prompt: parsed.brief,
+            status: "draft",
+            briefDraftFor: signal.id,
+            runner_id: null,
+            stage: null,
+            by: "steward",
+            at: new Date().toISOString(),
+          });
+          s.steward.lastBriefTick = new Date().toISOString();
+        }
+      } else {
+        s.board ??= {};
+        s.board[`steward-brief-unusable-${slug}`] = {
+          value: `Steward could not draft a usable brief for ${signal.id}: ${parsed.error}. The defect stays on the board, un-briefed — a human (or a re-triage) can still dispatch it.`,
+          by: "steward",
+          at: new Date().toISOString(),
+        };
+      }
+      s.steward.briefed.push(signal.id);
+      if (s.steward.briefed.length > 500) s.steward.briefed = s.steward.briefed.slice(-500);
+    });
+    drafted++;
+  }
+  return { drafted };
+}
+
 // The tick: read the state, triage every un-filed signal, write the triage
 // notes, mark them triaged. Adapters are injected so the harness runs this
 // against an in-memory store; the hub passes withState-backed ones.
@@ -434,6 +589,13 @@ export async function runStewardTick({ readState, writeState, ask, maxSignals = 
       s.steward.triaged ??= [];
       s.steward.triaged.push(report.id);
       if (s.steward.triaged.length > 500) s.steward.triaged = s.steward.triaged.slice(-500);
+      // Duty 3's input, recorded as data at triage time — the brief tick reads
+      // this list rather than parsing verdicts back out of triage-note prose.
+      if (decision.kind === "defect") {
+        s.steward.defects ??= [];
+        if (!s.steward.defects.includes(report.id)) s.steward.defects.push(report.id);
+        if (s.steward.defects.length > 500) s.steward.defects = s.steward.defects.slice(-500);
+      }
       s.steward.lastTick = new Date().toISOString();
     });
     filed++;

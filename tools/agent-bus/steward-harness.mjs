@@ -10,12 +10,16 @@
  */
 import assert from "node:assert/strict";
 import {
+  briefSignalsFor,
+  briefPrompt,
   mechanicalConcern,
+  parseBrief,
   parseReview,
   reviewPrompt,
   reviewSignalsFor,
   reviewTask,
   runStewardReviewTick,
+  runStewardBriefTick,
   parseTriage,
   runStewardTick,
   signalsFor,
@@ -393,6 +397,127 @@ await check("runStewardReviewTick: the mechanical gate runs without model spend"
   assert.equal(called, 0, "both failures are mechanical — the model is never asked");
   assert.match(state.tasks[0].firstPass.reason, /empty result/);
   assert.match(state.tasks[1].firstPass.reason, /repetition loop/);
+});
+
+// ── duty 3: brief drafting ──────────────────────────────────────────────────
+
+const GOOD_BRIEF = [
+  "PROBLEM: The export button on the settings page returns a 404 because the route is missing.",
+  "MUST PRODUCE: The route exists and returns the export; the dashboard shows the export button working; a suite pins the route.",
+  "DO NOT: Do not touch the auth layer or any other route handler.",
+  "CONTEXT: The report names agent/ui/index.html; no other files named.",
+].join(" ");
+
+await check("briefSignalsFor: triaged defects without a draft, one each, capped", () => {
+  const state = stateWith({ "defect/export-404": NOTE("export 404s") }, [
+    { id: "t1", status: "failed", title: "boom", result: "crash" },
+    { id: "t2", status: "draft", briefDraftFor: "note:defect/export-404", title: "Brief draft" },
+  ]);
+  state.steward = { defects: ["note:defect/export-404", "task:t1", "note:defect/export-404"] };
+  const s = briefSignalsFor(state);
+  assert.deepEqual(s.map((x) => x.id), ["task:t1"],
+    "the already-drafted defect is out, the failed task triaged as defect is in");
+  const big = stateWith({ "defect/a": NOTE("x") }, []);
+  big.steward = { defects: Array.from({ length: 20 }, () => "note:defect/a") };
+  assert.equal(briefSignalsFor(big).length, 1, "duplicate ids collapse");
+});
+
+await check("briefSignalsFor: defects unknown to the board or tasks are skipped, not guessed", () => {
+  const state = stateWith({}, []);
+  state.steward = { defects: ["note:defect/vanished"] };
+  assert.equal(briefSignalsFor(state).length, 0,
+    "a defect id with no report behind it never becomes a signal");
+});
+
+await check("briefPrompt: carries the report and demands the four sections", () => {
+  const p = briefPrompt({ id: "note:defect/x", key: "defect/x", title: "defect/x", value: "export 404" });
+  assert.match(p, /defect\/x/);
+  assert.match(p, /export 404/);
+  assert.match(p, /PROBLEM/);
+  assert.match(p, /MUST PRODUCE/);
+  assert.match(p, /DO NOT/);
+  assert.match(p, /CONTEXT/);
+});
+
+await check("parseBrief: real briefs pass, wishes and fences do not", () => {
+  assert.deepEqual(parseBrief(`\`\`\`\n${GOOD_BRIEF}\n\`\`\``), { brief: GOOD_BRIEF });
+  assert.ok(parseBrief("PROBLEM: it 404s. fix it.").error, "a one-liner is a wish, not a brief");
+  assert.ok(parseBrief("x".repeat(300)).error, "length without the sections is still not a brief");
+  assert.ok(parseBrief("").error);
+});
+
+await check("runStewardBriefTick: files a DRAFT task, marks once, second tick is a no-op", async () => {
+  const state = stateWith({ "defect/export-404": NOTE("export 404s") }, []);
+  state.steward = { defects: ["note:defect/export-404"] };
+  const res = await runStewardBriefTick({
+    readState: () => state,
+    writeState: (fn) => fn(state),
+    ask: async () => GOOD_BRIEF,
+  });
+  assert.equal(res.drafted, 1);
+  const task = state.tasks[0];
+  assert.equal(task.status, "draft", "a draft is claimed by nobody — dispatch is the orchestrator's approve");
+  assert.equal(task.briefDraftFor, "note:defect/export-404");
+  assert.equal(task.by, "steward");
+  assert.match(task.prompt, /MUST PRODUCE/);
+  assert.equal(state.steward.briefed.length, 1);
+  const again = await runStewardBriefTick({
+    readState: () => state,
+    writeState: (fn) => fn(state),
+    ask: async () => { throw new Error("should not be asked again"); },
+  });
+  assert.equal(again.drafted, 0);
+  assert.equal(state.tasks.length, 1, "one defect, one draft, never a second");
+});
+
+await check("runStewardBriefTick: an unusable draft is reported once, not retried", async () => {
+  const state = stateWith({ "defect/x": NOTE("x") }, []);
+  state.steward = { defects: ["note:defect/x"] };
+  let attempts = 0;
+  const res = await runStewardBriefTick({
+    readState: () => state,
+    writeState: (fn) => fn(state),
+    ask: async () => { attempts++; return "PROBLEM: it 404s."; },
+  });
+  assert.equal(res.drafted, 1, "the signal is settled — filed as unusable");
+  assert.equal(attempts, 1, "never a token furnace");
+  assert.equal(state.tasks.length, 0, "no half-brief became a task");
+  assert.match(state.board["steward-brief-unusable-note-defect-x"].value, /could not draft a usable brief/);
+  assert.equal(state.steward.briefed.length, 1);
+});
+
+await check("runStewardBriefTick: transport failure files ONE offline note, marks nothing", async () => {
+  const state = stateWith({ "defect/x": NOTE("x") }, []);
+  state.steward = { defects: ["note:defect/x"] };
+  const res = await runStewardBriefTick({
+    readState: () => state,
+    writeState: (fn) => fn(state),
+    ask: async () => { throw new Error("connection refused"); },
+  });
+  assert.equal(res.offline, true);
+  assert.ok(state.board["steward/offline"]);
+  assert.equal(state.steward.briefed?.length ?? 0, 0, "signals remain retryable");
+});
+
+await check("duty 1 -> duty 3: a defect triage becomes a brief signal, a lesson does not", async () => {
+  const state = stateWith(
+    { "defect/new": NOTE("the export button 404s on the settings page") },
+    []
+  );
+  await runStewardTick({
+    readState: () => state,
+    writeState: (fn) => fn(state),
+    ask: async () => JSON.stringify({ kind: "defect", duplicateOf: null, reason: "route missing" }),
+  });
+  assert.deepEqual(state.steward.defects, ["note:defect/new"], "defect verdict recorded as data");
+
+  const state2 = stateWith({ "problem/x": NOTE("we forgot to save problems to the bus") }, []);
+  await runStewardTick({
+    readState: () => state2,
+    writeState: (fn) => fn(state2),
+    ask: async () => JSON.stringify({ kind: "lesson", duplicateOf: null, reason: "process, not code" }),
+  });
+  assert.deepEqual(state2.steward.defects ?? [], [], "a lesson is not a fix task");
 });
 
 summary();

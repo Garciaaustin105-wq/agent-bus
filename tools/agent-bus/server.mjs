@@ -1072,10 +1072,17 @@ function callTool(name, args) {
         if (task.runner === me) {
           throw new Error("You ran this task. Review is someone else's read of your work — that is the whole point of the surface.");
         }
+        // A DRAFT task (status "draft", the steward's duty-3 brief) is
+        // dispatched by approval, pre-dispatch: the orchestrator reads the
+        // drafted brief and approves it into the queue. claimNextTask takes
+        // "queued" only, so an unapproved draft is work no worker can touch.
+        const dispatching = task.status === "draft" && verdict === "approve";
         task.reviews ??= [];
         task.reviews.push({ verdict, by: me, notes: notes || null, at: nowIso() });
         if (task.reviews.length > 10) task.reviews = task.reviews.slice(-10);
+        if (dispatching) task.status = "queued";
         return `${verdict === "approve" ? "Approved" : "Changes requested on"} ${taskId}` +
+          (dispatching ? " — draft brief approved, DISPATCHED to the queue" : "") +
           (notes ? ` — ${notes.slice(0, 200)}` : "") +
           ". The verdict is stamped on the task record.";
       });
