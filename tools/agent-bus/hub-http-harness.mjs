@@ -681,6 +681,42 @@ await check("the savings counter measures a REAL compaction — drop times every
   }
 });
 
+await check("the hub's own page totals tokens saved across EVERY space, one row per space", async () => {
+  // Dogfood report 2026-09-13: "on the this hub page i dont see the tokens
+  // saved". Sessions open in an app's folder, so the hub's own project alone
+  // reads 0. The same compaction as above (196,200), but in proj-a.
+  const dir = path.join(os.homedir(), ".claude", "projects", projA.replace(/[^a-zA-Z0-9]/g, "-"));
+  fs.mkdirSync(dir, { recursive: true });
+  const turn = (r, w, i) =>
+    `{"type":"assistant","message":{"usage":{"cache_read_input_tokens":${r},"cache_creation_input_tokens":${w},"input_tokens":${i},"output_tokens":10}}}`;
+  fs.writeFileSync(path.join(dir, "spacecomp.jsonl"), [
+    turn(90000, 10000, 500), turn(105000, 1000, 200),
+    '{"type":"system","compactMetadata":{}}',
+    turn(5000, 3000, 100), turn(8200, 100, 50),
+  ].join("\n") + "\n");
+  try {
+    let html = "";
+    for (let i = 0; i < 20; i++) {
+      html = await (await GET(`${base}/`)).text();
+      if (html.includes("<td>proj-a</td><td class=\"num\">1</td>")) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    const panel = (html.split("<h2>Tokens saved")[1] ?? "").split("<h2")[0];
+    const headline = panel.split("saved by compacting:")[1]?.split("</div>")[0] ?? "";
+    assert.ok(headline.includes("196,200"), `the hub headline counts the app space's compaction: ${headline}`);
+    assert.ok(/<td>proj-a<\/td>\s*<td class="num">1<\/td>\s*<td class="num">196,200<\/td>/.test(panel),
+      "a by-space row names proj-a with its compactions and its exact saving");
+    assert.ok(/<td>this hub<\/td>\s*<td class="num">0<\/td>\s*<td class="num">0<\/td>/.test(panel),
+      "the hub's own project is its own row, honestly zero");
+    assert.ok(!panel.includes("spacecom"), "per-session rows stay on the space's own page");
+    const app = await (await GET(`${base}/?p=proj-a`)).text();
+    const appPanel = (app.split("<h2>Tokens saved")[1] ?? "").split("<h2")[0];
+    assert.ok(appPanel.includes("196,200") && appPanel.includes("spacecom"), "the space's own page has the session");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 await check("a RUNNING task shows beside the tree lock even when the tree is free", async () => {
   const stPath = path.join(stateDir, "state.json");
   const seed = JSON.parse(fs.readFileSync(stPath, "utf8"));

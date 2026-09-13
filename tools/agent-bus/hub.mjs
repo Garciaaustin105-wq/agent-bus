@@ -932,6 +932,34 @@ function renderStatusHtml(state, opts = {}) {
     0
   );
 
+  // THE HUB PAGE TOTALS EVERY SPACE (dogfood report 2026-09-13: "on the this
+  // hub page i dont see the tokens saved"). Sessions are opened in an app's
+  // folder, not the hub's, so the hub's own project alone reads zero. Each
+  // space's figure is exact; the headline is their plain sum and every row
+  // names its space. App pages keep their own single-space number.
+  const bySpace = own
+    ? [
+        { name: "this hub", root: PROJECT_ROOT },
+        ...readRegistry(DIR).filter((e) => path.resolve(e.root) !== path.resolve(PROJECT_ROOT)),
+      ].map((s) => {
+        const t = s.root === PROJECT_ROOT ? tokens : readSessions({ root: s.root });
+        const c = s.root === PROJECT_ROOT
+          ? compaction
+          : compactionSavings(t.missing || !t.totals ? [] : t.rows.map((r) => r.scan));
+        return { name: s.name, events: c.events, tokens: c.total };
+      })
+    : null;
+  const savedTotal = bySpace ? bySpace.reduce((a, s) => a + s.tokens, 0) : compaction.total;
+  const savedEvents = bySpace ? bySpace.reduce((a, s) => a + s.events, 0) : compaction.events;
+  const bySpaceHtml = bySpace && bySpace.length > 1
+    ? `<table class="tw" style="margin-top:8px">
+    <tr><th>space</th><th class="num">compactions</th><th class="num">saved</th></tr>
+    ${bySpace
+      .map((s) => `<tr><td>${esc(s.name)}</td><td class="num">${s.events}</td><td class="num">${s.tokens.toLocaleString()}</td></tr>`)
+      .join("")}</table>
+  <p class="mut">Each space's sessions are listed on its own page.</p>`
+    : "";
+
   // THE SESSIONS LIST, inside the saved panel (request/all-sessions-in-saved).
   // Every session visible in one place: the cloud sessions are listed with
   // what they BURNED, read from the local transcripts by readSessions() —
@@ -1141,10 +1169,11 @@ ${costHtml}
 
 <h2>Tokens saved — re-reads cloud sessions never paid</h2>
 <div class="card">
-  <div style="font-size:24px">saved by compacting: <b>${compaction.total.toLocaleString()} tokens</b></div>
-  <div class="mut" style="padding-top:2px">over ${compaction.events} compaction${compaction.events === 1 ? "" : "s"} —
+  <div style="font-size:24px">saved by compacting: <b>${savedTotal.toLocaleString()} tokens</b></div>
+  <div class="mut" style="padding-top:2px">over ${savedEvents} compaction${savedEvents === 1 ? "" : "s"}${bySpace && bySpace.length > 1 ? `, across ${bySpace.length} spaces` : ""} —
     the context each session dropped, multiplied by every turn it ran after that.
     Counted exactly from the transcripts; the drop is real, and so is the turn count.</div>
+  ${bySpaceHtml}
   ${
     liveSaved > 0
       ? `<div style="padding-top:6px">In sessions still running: <b>${liveSaved.toLocaleString()} tokens</b></div>`
