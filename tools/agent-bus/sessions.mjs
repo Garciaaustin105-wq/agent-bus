@@ -25,12 +25,10 @@ import { scanTranscript, watch } from "./token-watch.mjs";
  * repo this bus serves, so pointing the bus at another project points the watch
  * at that project too — one setting, not two that can disagree.
  */
-export const SESSION_DIR = path.join(
-  os.homedir(),
-  ".claude",
-  "projects",
-  PROJECT_ROOT.replace(/[^a-zA-Z0-9]/g, "-")
-);
+export function sessionDirFor(root) {
+  return path.join(os.homedir(), ".claude", "projects", root.replace(/[^a-zA-Z0-9]/g, "-"));
+}
+export const SESSION_DIR = sessionDirFor(PROJECT_ROOT);
 
 /**
  * Ninety minutes with no new turn and the session is over.
@@ -46,7 +44,11 @@ export const LIVE_MS = 90 * 60 * 1000;
 // the next render without waiting out a 30 s cache.
 const TTL_MS = Number(process.env.AGENT_BUS_SESSION_TTL_MS) || 30_000;
 const scanCache = new Map(); // file -> { key, scan }
-let cached = { at: 0, value: null };
+// Per session directory. A hub page for another registered space reads THAT
+// project's transcripts (dogfood report 2026-09-13: "no saved tokens nothing
+// of you is showing" — the session worked in an app space, and the only
+// token panels on the hub read the hub's own project).
+const cachedByDir = new Map(); // dir -> { at, value }
 
 /**
  * Every session for this project, worst first, each with its assessment.
@@ -55,19 +57,21 @@ let cached = { at: 0, value: null };
  * project nobody has opened in Claude Code yet — which is a fact about the
  * machine, not an error, and the callers say so rather than showing zeros.
  */
-export function readSessions({ force = false, ttlMs = TTL_MS } = {}) {
+export function readSessions({ force = false, ttlMs = TTL_MS, root = PROJECT_ROOT } = {}) {
   const now = Date.now();
-  if (!force && cached.value && now - cached.at < ttlMs) return cached.value;
+  const dir = sessionDirFor(root);
+  const cached = cachedByDir.get(dir);
+  if (!force && cached && now - cached.at < ttlMs) return cached.value;
 
   let files;
   try {
     files = fs
-      .readdirSync(SESSION_DIR)
+      .readdirSync(dir)
       .filter((n) => n.endsWith(".jsonl"))
-      .map((n) => path.join(SESSION_DIR, n));
+      .map((n) => path.join(dir, n));
   } catch {
-    const empty = { rows: [], baseline: null, totals: null, missing: true, dir: SESSION_DIR };
-    cached = { at: now, value: empty };
+    const empty = { rows: [], baseline: null, totals: null, missing: true, dir };
+    cachedByDir.set(dir, { at: now, value: empty });
     return empty;
   }
 
@@ -99,10 +103,13 @@ export function readSessions({ force = false, ttlMs = TTL_MS } = {}) {
       sessions.push({ id: path.basename(file).slice(0, 8), idle: now - st.mtimeMs, scan: hit.scan });
     }
   }
-  for (const file of scanCache.keys()) if (!seen.has(file)) scanCache.delete(file);
+  // Forget only this directory's vanished files; other spaces keep their scans.
+  for (const file of scanCache.keys()) {
+    if (path.dirname(file) === dir && !seen.has(file)) scanCache.delete(file);
+  }
 
-  const value = { ...watch(sessions), missing: false, dir: SESSION_DIR };
-  cached = { at: now, value };
+  const value = { ...watch(sessions), missing: false, dir };
+  cachedByDir.set(dir, { at: now, value });
   return value;
 }
 

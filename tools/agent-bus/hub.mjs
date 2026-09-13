@@ -557,8 +557,9 @@ function renderStatusHtml(state, opts = {}) {
   const { flash = null, interactive = false } = opts;
   // §6 — which space this render belongs to. own (or unset) is the hub's own
   // bus, exactly as before. A project space renders its own bus state but
-  // keeps the hub-anchored panels (hardware, context budget, workers) off the
-  // page — they are the hub's learning and live on the hub's own page.
+  // keeps the hub-anchored panels (hardware, workers) off the page — they are
+  // the hub's and live on the hub's own page. The token panels are per space:
+  // a session working in an app reads its numbers on that app's page.
   const own = opts.proj?.own !== false;
   const projQ = opts.proj && !opts.proj.own ? `?p=${encodeURIComponent(opts.proj.name)}` : "";
   pruneAgents(state);
@@ -902,7 +903,9 @@ function renderStatusHtml(state, opts = {}) {
   // and they are different questions: where has the money gone (history, and
   // every row of it already spent), and which live session should compact right
   // now (the only part anyone can still act on).
-  const tokens = readSessions();
+  // This space's transcripts: the hub's own project on the hub page, the app's
+  // project on an app page — the panels below render on both.
+  const tokens = readSessions({ root: own ? PROJECT_ROOT : opts.proj.root });
   const M = (n) => (n / 1e6).toFixed(1) + "M";
   const K = (n) => Math.round(n / 1000).toLocaleString() + "k";
   const shortAgo = (ms) => {
@@ -1123,7 +1126,15 @@ ${flash ? `<div class="flash">${esc(flash)}</div>` : ""}
 ${
   own
     ? `<h2>This machine</h2>
-${hardwareHtml()}
+${hardwareHtml()}`
+    : `<div class="card">
+  <b>Shared with every space — not copied here</b>
+  <p class="mut">The rulebook and the how-we-work model below are the hub's
+    learning and stay shared, and so is this machine's hardware panel on
+    <a href="/">the hub's own page</a>. The token panels below are this
+    space's own: its project's transcripts and its local-model work.</p>
+</div>`
+}
 
 <h2>The context budget</h2>
 ${costHtml}
@@ -1189,16 +1200,7 @@ ${costHtml}
     panel above — what cloud sessions did not have to re-read. The context
     budget is the third side — what cloud sessions actually burned — and the
     three are never summed.</p>
-</div>`
-    : `<div class="card">
-  <b>Shared with every space — not copied here</b>
-  <p class="mut">The rulebook and the how-we-work model below are the hub's
-    learning and stay shared. So are this machine's hardware panel and
-    <a href="/">the context budget</a> — those read the hub's own bus and its
-    own transcripts, so they live on
-    <a href="/">the hub's own page</a> and are never duplicated per app.</p>
-</div>`
-}
+</div>
 
 <h2>Working tree</h2>
 <div class="lock${held ? " held" : ""}">${esc(describeLock(lock))}</div>

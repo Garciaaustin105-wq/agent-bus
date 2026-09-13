@@ -321,6 +321,44 @@ await check("a registered ?p= renders that project's bus, not the hub's", async 
   assert.ok(html.includes("server.mjs work local"), "the page says how to drain this queue instead");
 });
 
+await check("an app space shows ITS OWN token panels — its transcripts, its model work", async () => {
+  // Dogfood report 2026-09-13: "no saved tokens nothing of you is showing on
+  // the agent bus". The session worked in an app space; the only token panels
+  // read the hub's own project, so its numbers showed nowhere.
+  const dir = path.join(os.homedir(), ".claude", "projects", projA.replace(/[^a-zA-Z0-9]/g, "-"));
+  fs.mkdirSync(dir, { recursive: true });
+  const line =
+    '{"type":"assistant","message":{"usage":{"cache_read_input_tokens":3000,"cache_creation_input_tokens":300,"input_tokens":60,"output_tokens":7}}}';
+  fs.writeFileSync(path.join(dir, "appsess1.jsonl"), line + "\n" + line + "\n");
+  const st = JSON.parse(fs.readFileSync(projAState, "utf8"));
+  st.taskSeq = 1;
+  st.tasks = [{ id: "t1", lane: "local", title: "app model work", prompt: "x", status: "done",
+    at: new Date().toISOString(), doneAt: new Date().toISOString(), usage: { prompt: 4321, output: 1000 } }];
+  fs.writeFileSync(projAState, JSON.stringify(st));
+  try {
+    let html = "";
+    for (let i = 0; i < 20; i++) {
+      html = await (await GET(`${base}/?p=proj-a`)).text();
+      if (html.includes("6,734")) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    const saved = (html.split("<h2>Tokens saved")[1] ?? "").split("<h2")[0];
+    const work = (html.split("<h2>Work your model ran")[1] ?? "").split("<h2")[0];
+    assert.ok(html.includes("<h2>The context budget</h2>"), "the context budget renders in the app space");
+    assert.ok(saved.includes("appsess1") && saved.includes("6,734"), "the app's session is listed with its exact burn (2 x 3,367)");
+    assert.ok(work.includes("5,321"), "the app's local-model work is counted on the app's page");
+    assert.ok(!html.includes("<h2>This machine</h2>"), "the hardware panel stays on the hub's own page");
+    const hub = await (await GET(`${base}/`)).text();
+    assert.ok(!hub.includes("appsess1"), "the app's session does not leak onto the hub's own panels");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    const back = JSON.parse(fs.readFileSync(projAState, "utf8"));
+    back.tasks = [];
+    back.taskSeq = 0;
+    fs.writeFileSync(projAState, JSON.stringify(back));
+  }
+});
+
 await check("a session on an OLD copy of the bus is named on its card, and an empty hub points at the space it is in", async () => {
   // Dogfood report 2026-09-13 ("i dont see you"): the session was on the
   // space's board all along, through a vendored server.mjs that records no
