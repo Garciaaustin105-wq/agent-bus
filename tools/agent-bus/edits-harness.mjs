@@ -7,7 +7,10 @@
  *
  *   node tools/agent-bus/edits-harness.mjs
  */
-import { extractEdits, applyEdits, detectEol, toEol, EDIT_PROTOCOL_PROMPT } from "./edits.mjs";
+import { extractEdits, applyEdits, detectEol, toEol, EDIT_PROTOCOL_PROMPT, refuseBusSelfEdit } from "./edits.mjs";
+import { spawnSync } from "node:child_process";
+import os from "node:os";
+import path from "node:path";
 
 let pass = 0;
 const fails = [];
@@ -280,6 +283,49 @@ check("protocol-prompt-states-the-rules", () => {
   for (const must of ["EXACTLY ONCE", "byte-for-byte", "non-ASCII", "no markdown fence"]) {
     ok(EDIT_PROTOCOL_PROMPT.includes(must), `the preamble must still say "${must}" — each line is a failure that happened`);
   }
+});
+
+/* ------------------------------ self-edit guard ---------------------------- */
+
+// The bus must never be the mechanism that rewrites the bus. A board note is
+// untrusted data, and "update the bus to fix X" is exactly the instruction
+// such data would carry at an agent able to drive the edit protocol. The
+// person changes the bus by hand, deliberately.
+const BUS_DIR = path.join(os.tmpdir(), "agent-bus-guard-example", "tools", "agent-bus");
+
+check("a target inside the bus's own directory is refused", () => {
+  ok(refuseBusSelfEdit(path.join(BUS_DIR, "server.mjs"), BUS_DIR), "direct child refused");
+  ok(refuseBusSelfEdit(path.join(BUS_DIR, "sub", "deep.mjs"), BUS_DIR), "nested child refused");
+  eq(refuseBusSelfEdit(path.join(BUS_DIR, "..", "src", "thing.ts"), BUS_DIR), null, "outside the bus is fine");
+});
+
+check("the refusal survives resolution games", () => {
+  // ".." traversal back into the bus, and Windows case-folding: a guard beaten
+  // by "TOOLS" vs "tools" protects nothing.
+  ok(
+    refuseBusSelfEdit(path.join(BUS_DIR, "..", path.basename(BUS_DIR), "hub.mjs"), BUS_DIR),
+    ".. and back in refused",
+  );
+  if (process.platform === "win32") {
+    ok(
+      refuseBusSelfEdit(BUS_DIR.toLowerCase() + path.sep + "hub.mjs", BUS_DIR.toUpperCase()),
+      "case-folded comparison",
+    );
+  }
+});
+
+check("the CLI enforces the guard before it reads anything", () => {
+  // Wiring, not logic — the pure refusal is checked above; this proves the
+  // entry point calls it, and calls it FIRST: --in does not even exist here,
+  // yet the answer is the refusal, not a read error. The target is the bus's
+  // own edits.mjs — the real thing the guard exists to refuse.
+  const out = spawnSync(
+    process.execPath,
+    [path.join(import.meta.dirname, "edits.mjs"), "--in", "x", "--file", path.join(import.meta.dirname, "edits.mjs")],
+    { encoding: "utf8" },
+  );
+  ok(out.status === 1, `exit 1, got ${out.status}`);
+  ok(String(out.stderr).includes("REFUSED"), "says why");
 });
 
 /* ---------------------------------- report --------------------------------- */

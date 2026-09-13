@@ -60,6 +60,12 @@ Two behavioural guarantees the harnesses pin, in one line each:
   for a person; deletion is the user's action, always.
 - **Nothing here enables or merges.** Discovered runners ship disabled;
   lessons land as advice, not rulebook text.
+- **The bus does not edit itself.** The edit protocol refuses any target
+  inside the bus's own directory, dry run included — agents coordinate work in
+  the project, and the person changes the bus by hand, deliberately. Board
+  notes and task prompts are untrusted data, and "update the bus to fix X" is
+  exactly the instruction such data would carry. (`AGENT_BUS_ALLOW_SELF_EDIT=1`
+  is the maintainer's explicit override, not a default.)
 
 ## Why the dependency count matters
 

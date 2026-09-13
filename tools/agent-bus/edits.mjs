@@ -18,6 +18,13 @@
  * Pure on purpose: applyEdits takes strings and returns strings, so the
  * harness runs it without a repo, a model or a network (build rule 2).
  *
+ * SELF-EDIT REFUSAL. The bus never edits its own code: a target inside the
+ * directory this file lives in is refused before anything is read, dry run
+ * included. The person changes the bus by hand, deliberately — not through an
+ * edit batch an agent may have been talked into (a board note is untrusted
+ * data, and "update the bus" is exactly the instruction such data would
+ * carry). AGENT_BUS_ALLOW_SELF_EDIT=1 is the maintainer's explicit override.
+ *
  * CLI:
  *   node tools/agent-bus/edits.mjs --in out.json --file src/thing.ts --dry
  *   node tools/agent-bus/edits.mjs --in out.json --file src/thing.ts
@@ -257,6 +264,31 @@ export function formatResult(r, total) {
   return out.join("\n");
 }
 
+/* ----------------------------- self-edit guard ---------------------------- */
+
+/** The bus does not edit itself. A target inside the directory this file lives
+ *  in is refused before anything is read — agents coordinate work in the
+ *  PROJECT, and the person changes the bus by hand, deliberately, never
+ *  through an edit batch an agent may have been talked into. Pure on the same
+ *  rule as applyEdits: takes paths, returns a refusal message or null, no
+ *  filesystem. The comparison is case-folded on Windows because NT paths are
+ *  case-insensitive and "TOOLS" vs "tools" must not slip past a guard. */
+export function refuseBusSelfEdit(targetPath, busDir) {
+  const target = path.resolve(String(targetPath ?? ""));
+  const home = path.resolve(String(busDir ?? ""));
+  const fold = (p) => (process.platform === "win32" ? p.toLowerCase() : p);
+  const t = fold(target);
+  const h = fold(home);
+  if (t === h || t.startsWith(h + path.sep)) {
+    return (
+      `REFUSED: the bus does not edit its own code — ${target} is inside ` +
+      `${home}. The person changes the bus by hand, deliberately, never ` +
+      `through an edit batch. (Maintainer override: AGENT_BUS_ALLOW_SELF_EDIT=1.)`
+    );
+  }
+  return null;
+}
+
 /* ---------------------------------- CLI ---------------------------------- */
 
 // pathToFileURL, not a pathname regex: URL.pathname keeps percent-escapes, so
@@ -278,6 +310,17 @@ if (isMain) {
   if (!inPath || !filePath) {
     console.error("usage: node tools/agent-bus/edits.mjs --in <model-output> --file <target> [--dry]");
     process.exit(1);
+  }
+
+  // The self-edit guard fires before anything is read — fail fast. A --dry
+  // run of a bus-targeted batch is still a refusal: the boundary is the
+  // target, not the write.
+  if (process.env.AGENT_BUS_ALLOW_SELF_EDIT !== "1") {
+    const refusal = refuseBusSelfEdit(filePath, import.meta.dirname);
+    if (refusal) {
+      console.error(refusal);
+      process.exit(1);
+    }
   }
 
   let edits;

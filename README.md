@@ -158,7 +158,7 @@ renders the same way. Both are unset here.
 ```sh
 node tools/agent-bus/e2e-agent-bus.mjs        # 65 — stdio end to end, temp dirs only
 node tools/agent-bus/agent-harness.mjs        # 33 — hub-agent dispatch rules
-node tools/agent-bus/edits-harness.mjs        # 29 — edit-protocol failure modes
+node tools/agent-bus/edits-harness.mjs        # 32 — edit-protocol failure modes + the self-edit guard
 node tools/agent-bus/lessons-harness.mjs      # 23 — the cross-install learning seam
 node tools/agent-bus/token-watch-harness.mjs  # 46 — context-budget watch
 node tools/agent-bus/discover-harness.mjs     # 11 — fleet discovery + the openai runner
@@ -172,7 +172,7 @@ node tools/agent-bus/bench-harness.mjs        # 23 — the bench contract: never
 node tools/agent-bus/lock-harness.mjs         # 5  — state lock staleness and identity
 ```
 
-337 checks in total. All suites use temp dirs and never touch real state.
+340 checks in total. All suites use temp dirs and never touch real state.
 
 ## Learning across installs
 
