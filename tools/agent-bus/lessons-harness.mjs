@@ -80,7 +80,7 @@ check("scrub-urls-before-paths-or-they-mangle", () => {
   // scrubbed lesson reads as <path>://<path>.
   const out = scrubToProblemShape("see https://example.com/private/policy?id=7");
   assert.equal(out, "see <url>", `no path-inside-a-url mangling: ${out}`);
-  assert.ok(!out.includes("example.com"), "the host is gone too");
+  assert.doesNotMatch(out, /example\.com/, "the host is gone too");
 });
 
 check("scrub-emails", () => {
