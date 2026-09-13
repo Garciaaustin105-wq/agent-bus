@@ -249,9 +249,9 @@ function withState(fn) {
       // unreadable (a corrupt file, a permission slip) is NOT: starting from
       // an empty base here would silently overwrite the whole bus — every
       // note, task and lesson gone with the next write. Fail loudly instead;
-      // the person recovers the file, the bus does not destroy it. Found
-      // live while two hub processes raced one state file during the
-      // steward's smoke test (2026-09-13).
+      // the person recovers the file, the bus does not destroy it. Hardened
+      // while building the steward triage loop (2026-09-13): the bus's whole
+      // value is that nothing reported to it is ever lost.
       if (err.code === "ENOENT") state = null;
       else throw err;
     }
