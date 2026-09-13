@@ -1124,12 +1124,18 @@ function callTool(name, args) {
             // lastSeen is refreshed by touch() on every bus call, and
             // pruneAgents drops anyone an hour cold (unless their process is
             // still running) — so this is the honest answer to "is that one
-            // still there?" rather than a guess. "running" is stronger than
-            // any timestamp: the OS says the process exists right now.
+            // still there?" rather than a guess. "alive" is what the pid
+            // check actually proves: the process exists right now. Only a
+            // claimed task means "running" (dogfood report 2026-09-13 — the
+            // dashboard badge read "running" over an empty queue).
             const seen = a.lastSeen ? ago(a.lastSeen) : "unknown";
+            const heldTask = (state.tasks ?? []).find(
+              (t) => t.status === "running" && t.runner === n
+            );
+            const state_ = heldTask ? ` · running ${heldTask.id}` : agentRunning(a) ? " · alive" : "";
             lines.push(`  ${n}${mine}`);
             lines.push(`     ${a.lane || "no lane stated"}`);
-            lines.push(`     last seen ${seen}${agentRunning(a) ? " · running" : ""}`);
+            lines.push(`     last seen ${seen}${state_}`);
           }
         }
         lines.push("", "WORKING TREE", "  " + describeLock(state.lock));

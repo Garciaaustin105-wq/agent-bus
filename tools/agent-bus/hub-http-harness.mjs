@@ -154,12 +154,15 @@ await check("the normal page still renders", async () => {
   assert.ok(html.includes("This machine"), "the hardware panel renders even where nvidia-smi is absent");
 });
 
-await check("a live process shows running even hours cold; a dead one falls back to quiet", async () => {
+await check("a claimed task shows running <id>; a live process alone shows alive; a dead one is pruned", async () => {
   // The 1-hour prune and the 2-minute quiet both answer "has it called the
-  // bus" — not "is it running". The pid closes that gap: the hub asks the OS
-  // whether the agent's process exists, so a long-lived agent working locally
-  // between bus calls stays bright, and the fallback stays honest. Each
-  // assertion gets its own render so the two cards cannot blur together.
+  // bus" — not "is it running". The pid closes that gap — but a live pid
+  // proves the agent's PROCESS exists, not that it holds work (dogfood
+  // report 2026-09-13: every card said "running" over a 0/0 board). So the
+  // badge is three-valued: "running <task.id>" only when a claimed task
+  // names this agent as its runner; "alive" for a verifiable process with
+  // no claimed task; prune/quiet fallbacks unchanged. Each assertion gets
+  // its own render so the cards cannot blur together.
   const stale = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
   const s = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
   s.agents = {
@@ -170,8 +173,18 @@ await check("a live process shows running even hours cold; a dead one falls back
   };
   fs.writeFileSync(path.join(stateDir, "state.json"), JSON.stringify(s));
   let html = await (await GET(base)).text();
-  assert.ok(html.includes('<span class="run">running</span>'), "the badge renders for a verifiable process");
+  assert.ok(html.includes('<span class="mut">alive</span>'), "a live process with no claimed task shows alive");
+  assert.ok(!html.includes('<span class="run">running'), "no running badge without a claimed task");
   assert.ok(!html.includes('class="card quiet"'), "a live process is not dimmed, whatever its lastSeen");
+
+  // Now the same agent holds a claimed task: the badge names the task.
+  s.tasks = (s.tasks ?? []).concat({
+    id: "t-badge", lane: "build", title: "held", prompt: "", by: "test",
+    status: "running", runner: "live-runner", at: stale, startedAt: stale,
+  });
+  fs.writeFileSync(path.join(stateDir, "state.json"), JSON.stringify(s));
+  html = await (await GET(base)).text();
+  assert.ok(html.includes('<span class="run">running t-badge</span>'), "a claimed task earns running <id>");
 
   s.agents = {
     "ghost-cli": {

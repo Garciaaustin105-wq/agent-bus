@@ -624,17 +624,30 @@ function renderStatusHtml(state, opts = {}) {
   const agentCards = agents.length
     ? agents
         .map(([name, a]) => {
-          // Three states, in honesty order. "running" is the strongest: the OS
-          // confirms this agent's process exists right now, so the card stays
-          // bright however long the agent has gone between bus calls. "quiet"
-          // means two minutes without a bus call and no process to vouch for
-          // the agent (a CLI one-shot, or a machine this one cannot check) —
-          // called "quiet", not "offline": the bus cannot tell the difference
-          // and must not pretend.
+          // Three states, in honesty order — and the badge must mean what it
+          // says (dogfood report 2026-09-13: the board showed 0 queued /
+          // 0 running while every Connected card said "running", because a
+          // live pid proves the agent's PROCESS exists, not that it holds
+          // work — a long-lived session is alive for hours over an empty
+          // queue). So "running <task.id>" is reserved for a task with
+          // status "running" that names this agent as its runner (claimNextTask
+          // stamps task.runner); a live process with no claimed task shows the
+          // honest "alive". "quiet" means two minutes without a bus call and
+          // no process to vouch for the agent (a CLI one-shot, or a machine
+          // this one cannot check) — called "quiet", not "offline": the bus
+          // cannot tell the difference and must not pretend.
+          const heldTask = (state.tasks ?? []).find(
+            (t) => t.status === "running" && t.runner === name
+          );
           const running = agentRunning(a);
+          const badge = heldTask
+            ? `<span class="run">running ${esc(heldTask.id)}</span>`
+            : running
+              ? '<span class="mut">alive</span>'
+              : "";
           const quiet = !running && now - Date.parse(a.lastSeen ?? 0) > 120_000;
           return `<div class="card${quiet ? " quiet" : ""}">
-      <div class="row"><span class="dot"></span><b>${esc(name)}</b>${running ? '<span class="run">running</span>' : ""}
+      <div class="row"><span class="dot"></span><b>${esc(name)}</b>${badge}
         <span class="mut">${esc(ago(a.lastSeen ?? new Date(0).toISOString()))}</span></div>
       <p class="lane">${esc(a.lane || "no lane stated")}</p>
       ${a.capable?.length ? `<p class="mut">can grant: ${esc(a.capable.join(", "))}</p>` : ""}
@@ -973,6 +986,10 @@ ${costHtml}`
 
 <h2>Working tree</h2>
 <div class="lock${held ? " held" : ""}">${esc(describeLock(lock))}</div>
+<p class="mut">The lock covers <span class="path">${esc(repo)}</span> — this
+  space's checkout only. Work in another project's tree never shows here
+  (dogfood report 2026-09-13: "free" on the hub page while camera work ran,
+  because that lock lives in the camera tree, not this one).</p>
 ${actions}
 
 ${
