@@ -42,7 +42,9 @@ export const SESSION_DIR = path.join(
  */
 export const LIVE_MS = 90 * 60 * 1000;
 
-const TTL_MS = 30_000;
+// The harness sets this small so a transcript written mid-suite is visible to
+// the next render without waiting out a 30 s cache.
+const TTL_MS = Number(process.env.AGENT_BUS_SESSION_TTL_MS) || 30_000;
 const scanCache = new Map(); // file -> { key, scan }
 let cached = { at: 0, value: null };
 

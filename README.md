@@ -268,6 +268,8 @@ taken from `usage` are exact; these are not, and the two are never added.
 Every local task also records its exact `usage` (`{"prompt": n, "output": n}`)
 on the task record — that is the savings side: what a task cost locally, billed
 $0, versus what the same work through a cloud session burns (which
-`context-cost.cjs` measures from transcripts). The counterfactual "what it
-would have cost without the bus" is never computed per task, because it
-cannot be exact.
+`context-cost.cjs` measures from transcripts). The dashboard's saved panel
+shows both sides in one place — local tasks as saved, and every Claude Code
+session listed with what it burned, read from the local transcripts — and the
+two are never summed. The counterfactual "what it would have cost without the
+bus" is never computed per task, because it cannot be exact.

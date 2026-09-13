@@ -46,7 +46,14 @@ fs.copyFileSync(
 const child = spawn(
   process.execPath,
   [path.join(import.meta.dirname, "hub.mjs"), String(freePort)],
-  { env: { ...process.env, AGENT_BUS_PROJECT: HOME }, stdio: ["ignore", "pipe", "pipe"] }
+  {
+    env: {
+      ...process.env,
+      AGENT_BUS_PROJECT: HOME,
+      AGENT_BUS_SESSION_TTL_MS: "100", // see sessions.mjs — mid-suite transcript visibility
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  }
 );
 
 // The hub prints its real port once listening. "0" is refused as NaN by the
@@ -485,6 +492,55 @@ await check("the savings counter shows TOKENS ONLY — no dollar figures, nothin
   assert.ok(panel.includes(expected.toLocaleString()), `the total counts recorded usage (${expected})`);
   assert.ok(panel.includes("This session:"), "the session line renders");
   assert.ok(!panel.includes("$"), "NO dollar signs — every agent prices differently, tokens are the exact unit");
+});
+
+await check("a fresh install with no records shows honest empty states — nothing estimated to fill the blank", async () => {
+  const html = await (await GET(`${base}/`)).text();
+  const panel = (html.split("<h2>Tokens saved")[1] ?? "").split("<h2")[0];
+  assert.ok(panel.includes("Sessions"), "the sessions section renders");
+  assert.ok(
+    panel.includes("No Claude Code sessions measured for this project yet"),
+    "no transcripts -> the fill-in note, not fabricated rows"
+  );
+  assert.ok(panel.includes("nothing is estimated to fill the blank"), "and the blank is named honestly");
+});
+
+await check("the sessions list shows every Claude session with what it burned — read locally, never summed into saved", async () => {
+  // Claude Code stores transcripts under the REAL home, in a directory named
+  // after the project root with every non-alphanumeric character dashed —
+  // exactly what sessions.mjs derives from PROJECT_ROOT. Write one there so
+  // the hub finds it on its next render.
+  const dir = path.join(
+    os.homedir(),
+    ".claude",
+    "projects",
+    HOME.replace(/[^a-zA-Z0-9]/g, "-")
+  );
+  fs.mkdirSync(dir, { recursive: true });
+  const line =
+    '{"type":"assistant","message":{"usage":{"cache_read_input_tokens":1000,"cache_creation_input_tokens":100,"input_tokens":50,"output_tokens":25}}}';
+  fs.writeFileSync(path.join(dir, "sessburn.jsonl"), line + "\n" + line + "\n");
+  try {
+    // Two turns x 1,175 = 2,350 burned. Poll: the render cache is 100 ms
+    // (AGENT_BUS_SESSION_TTL_MS), so the row appears within a tick or two.
+    let html = "";
+    for (let i = 0; i < 20; i++) {
+      html = await (await GET(`${base}/`)).text();
+      if (html.includes("2,350")) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    const panel = (html.split("<h2>Tokens saved")[1] ?? "").split("<h2")[0];
+    assert.ok(panel.includes("sessburn"), "the session id is listed");
+    assert.ok(panel.includes("2,350"), "its burned total is the exact read+write+input+output sum");
+    assert.ok(panel.includes("burned (billed to you)"), "the column names burned for what it is");
+    const savedLine = panel.split("saved so far:")[1].split("tokens")[0];
+    assert.ok(
+      !savedLine.includes("2,350"),
+      "burned is NEVER summed into saved — saved still counts local tasks only"
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true }); // nothing of ours left behind
+  }
 });
 
 await check("a RUNNING task shows beside the tree lock even when the tree is free", async () => {

@@ -840,6 +840,31 @@ function renderStatusHtml(state, opts = {}) {
     return hr < 48 ? hr + "h" : Math.round(hr / 24) + "d";
   };
 
+  // THE SESSIONS LIST, inside the saved panel (request/all-sessions-in-saved).
+  // Every session visible in one place: the saved rows are local tasks; the
+  // Claude Code sessions that share this project are listed with what they
+  // BURNED, read from the local transcripts by readSessions() — never asked of
+  // a cloud agent (there is nothing to ask and no account to ask with), and
+  // never summed into saved, because burned was billed to you and saved was
+  // not. A fresh install with no records gets honest empty states, never a
+  // fabricated baseline.
+  const sessionRows =
+    tokens.missing || !tokens.totals || !tokens.totals.turns
+      ? []
+      : tokens.rows
+          .slice()
+          .sort((a, b) => a.idle - b.idle)
+          .map((r) => {
+            const s = r.scan ?? {};
+            const burned =
+              (s.read ?? 0) + (s.write ?? 0) + (s.input ?? 0) + (s.output ?? 0);
+            return `<tr><td>${esc(r.id)}${
+              r.idle < LIVE_MS ? ' <span class="mutcell">live</span>' : ""
+            }</td>
+        <td class="num mutcell">${esc(shortAgo(r.idle))} ago</td>
+        <td class="num">${burned.toLocaleString()}</td></tr>`;
+          });
+
   let costHtml;
   if (tokens.missing || !tokens.totals || !tokens.totals.turns) {
     costHtml = `<p class="mut">No Claude Code transcripts for this project yet, so
@@ -1025,6 +1050,19 @@ ${costHtml}
     one unit that is exact and leaves pricing to you. The context budget
     above is the other side — what cloud sessions actually burned — and the
     two are never summed.</p>
+  <div style="padding-top:8px"><b>Sessions</b> — every session this bus can
+    see, read from the transcripts on this machine. The bus never asks a
+    cloud agent anything: there is nothing to ask and no account to ask
+    with, so both sides come from local records only.</div>
+  ${
+    sessionRows.length
+      ? `<table class="tw">
+    <tr><th>session</th><th class="num">last active</th><th class="num">burned (billed to you)</th></tr>
+    ${sessionRows.join("")}</table>`
+      : `<p class="mut">No Claude Code sessions measured for this project yet —
+    the list fills in from the local transcripts as sessions happen, and
+    nothing is estimated to fill the blank.</p>`
+  }
 </div>`
     : `<div class="card">
   <b>Shared with every space — not copied here</b>
