@@ -602,3 +602,168 @@ export async function runStewardTick({ readState, writeState, ask, maxSignals = 
   }
   return { triaged: filed };
 }
+
+// ── duty 4: lesson promotion ────────────────────────────────────────────────
+// L3 on the board: "a miss reported three times is a rule that has not been
+// written yet." The miss verb counts the reports; this duty is what counts
+// THEM. A miss whose `seen` has reached 3 is a signal the steward owes a
+// PROPOSAL to — a rulebook patch shaped exactly like the rulebook's own rules
+// (### <id>. <title> + body, from parseRulebook's grammar in agent.mjs), filed
+// as a board note the maintainer can copy-paste into docs/build-rules.md.
+//
+// The boundary is C4 in its plainest form: the steward NEVER writes to the
+// rulebook. The proposal note carries the provenance and the human gate in its
+// own text — applying it is the maintainer's edit, and only the maintainer's.
+// Marked once in state.steward.promoted; garbage is reported once and never
+// retried (same no-token-furnace rule as the other duties).
+
+const PROMOTION_MAX = 5;
+const PROMOTION_SEEN = 3; // L3's threshold, on the board's own words
+const PROMOTION_RULE_MIN = 80;
+const PROMOTION_RULE_MAX = 4000;
+
+export function promotionSignalsFor(state) {
+  const promoted = new Set(state.steward?.promoted ?? []);
+  const signals = [];
+  for (const [key, entry] of Object.entries(state.board ?? {})) {
+    if (!entry || !entry.miss) continue;
+    if ((entry.seen ?? 1) < PROMOTION_SEEN) continue;
+    const id = `promotion:${key}`;
+    if (promoted.has(id)) continue;
+    signals.push({
+      id,
+      key,
+      seen: Number(entry.seen ?? 1),
+      value: entry?.value ?? "",
+    });
+    if (signals.length >= PROMOTION_MAX) break;
+  }
+  return signals;
+}
+
+// The prompt carries the miss's own pairing (CLAIMED/TRUE/CAUGHT BY, the miss
+// verb's shape) plus the rulebook's existing rule ids, so the model proposes
+// into the rulebook's actual numbering instead of colliding with it. It is
+// told what the rulebook's rule shape IS — a `### <id>. <title>` heading and a
+// body — because the deliverable is a block the maintainer can paste as-is.
+export function promotionPrompt(signal, existingRuleIds) {
+  return [
+    "You propose a new rule for a rulebook of engineering rules (docs/build-rules.md). Reply with ONLY a JSON object — no preamble, no code fences.",
+    'The object MUST have exactly these fields: {"rule": "<the rule block>", "reason": "<why this rule, from the recurring miss>", "source": "' + signal.key + '"}',
+    "The rule block is the rulebook's own shape: a first line `### <id>. <title>` where <id> is a letter+number like B7 or H2, followed by 2-6 lines of body. Write it as a rule, not a report.",
+    "Use a NEW id: " + (existingRuleIds.length ? `these ids already exist — ${existingRuleIds.join(", ")}.` : "the rulebook currently has none.") + " Keep the letter matching the group a maintainer would place it in (A shape, B data, C refusing, D numbers, E verification, F other agents, G asking people) — they will renumber if needed.",
+    "The rule must generalise past this one incident: it is a rule BECAUSE the same miss recurred.",
+    "",
+    `RECURRING MISS (${signal.seen} reports — the L3 threshold):`,
+    String(signal.value ?? "").slice(0, 2000),
+  ].join("\n");
+}
+
+// Parse the proposal to a rule STRING or { error }. JSON in, the block
+// validated against the rulebook's own heading grammar — a proposal that does
+// not parse as a rule would not parse into the rulebook either.
+export function parsePromotion(text) {
+  if (typeof text !== "string") return { error: "model returned no text" };
+  const cleaned = text
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/```\s*$/, "")
+    .trim();
+  let obj;
+  try {
+    obj = JSON.parse(cleaned);
+  } catch {
+    return { error: "reply is not a JSON object" };
+  }
+  if (!obj || typeof obj !== "object") return { error: "reply is not a JSON object" };
+  const rule = typeof obj.rule === "string" ? obj.rule.trim() : "";
+  const reason = typeof obj.reason === "string" ? obj.reason.trim() : "";
+  if (!rule) return { error: "missing `rule`" };
+  if (!reason) return { error: "missing `reason` — a proposal without its why is not reviewable" };
+  const head = rule.match(/^###\s+([A-Z]\d+)\.\s+(.+)$/m);
+  if (!head) return { error: "rule does not start with a `### <id>. <title>` heading" };
+  const body = rule.split(/\r?\n/).slice(1).join("\n").trim();
+  if (!body) return { error: "rule has a heading but no body" };
+  const t = rule.slice(0, PROMOTION_RULE_MAX);
+  if (t.length < PROMOTION_RULE_MIN) {
+    return { error: `rule is too short to be a rule (${t.length} chars)` };
+  }
+  return { rule: t, reason: reason.slice(0, 2000), id: head[1] };
+}
+
+// The promotion tick: read the state, propose a rule for every miss reported
+// PROMOTION_SEEN times without one, file the proposal as a board note. Same
+// transport rule as every other duty — one upserted `steward/offline` note,
+// nothing marked, retry later; same unusable rule — ONE note with the reason,
+// marked once, never retried into a token furnace. `rulebook` is the raw
+// markdown (or null); its existing ids are extracted mechanically so a
+// proposal cannot collide with a rule that is already written.
+export async function runStewardPromotionTick({
+  readState,
+  writeState,
+  ask,
+  rulebook = null,
+  maxSignals = PROMOTION_MAX,
+}) {
+  const state = readState();
+  const signals = promotionSignalsFor(state).slice(0, maxSignals);
+  if (!signals.length) return { promoted: 0 };
+
+  const existingRuleIds = String(rulebook ?? "").match(/^###\s+([A-Z]\d+)\./gm)?.map(
+    (m) => m.replace(/^###\s+/, "").replace(/\.$/, "")
+  ) ?? [];
+
+  let promoted = 0;
+  for (const signal of signals) {
+    let answer;
+    try {
+      answer = await ask(promotionPrompt(signal, existingRuleIds));
+    } catch (err) {
+      writeState((s) => {
+        s.board ??= {};
+        s.board["steward/offline"] = {
+          value: `Steward could not reach the local runner for rule promotion (${err?.message ?? String(err)}). The recurring miss stays proposal-less and will retry — nothing was lost.`,
+          by: "steward",
+          at: new Date().toISOString(),
+        };
+      });
+      return { promoted, offline: true };
+    }
+    const parsed = parsePromotion(answer);
+    const slug = signal.key.replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "unnamed";
+    writeState((s) => {
+      s.steward ??= {};
+      s.steward.promoted ??= [];
+      s.board ??= {};
+      const dup =
+        parsed.rule && existingRuleIds.includes(parsed.id)
+          ? { error: `proposed id ${parsed.id} already exists in the rulebook` }
+          : null;
+      if (parsed.rule && !dup) {
+        s.board[`steward-rule-proposal-${slug}`] = {
+          value: [
+            `STEWARD RULE PROPOSAL (duty 4). Source: ${signal.key} — reported ${signal.seen} times; L3 says a miss reported three times is a rule that has not been written yet.`,
+            "Applying it is the MAINTAINER'S edit — the steward never writes rules (C4). Ready to paste into docs/build-rules.md:",
+            "",
+            parsed.rule,
+            "",
+            `WHY: ${parsed.reason}`,
+          ].join("\n"),
+          by: "steward",
+          at: new Date().toISOString(),
+        };
+        s.steward.lastPromotionTick = new Date().toISOString();
+      } else {
+        s.board[`steward-rule-unusable-${slug}`] = {
+          value: `Steward could not draft a usable rule proposal for ${signal.id}: ${(dup ?? parsed).error}. The miss stays on the board — a human can still write the rule from it.`,
+          by: "steward",
+          at: new Date().toISOString(),
+        };
+      }
+      s.steward.promoted.push(signal.id);
+      if (s.steward.promoted.length > 500) s.steward.promoted = s.steward.promoted.slice(-500);
+    });
+    promoted++;
+  }
+  return { promoted };
+}

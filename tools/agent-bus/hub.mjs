@@ -44,7 +44,12 @@ import {
   withState,
 } from "./server.mjs";
 import { readRegistry, resolveProject } from "./projects.mjs";
-import { runStewardTick, runStewardReviewTick, runStewardBriefTick } from "./steward.mjs";
+import {
+  runStewardTick,
+  runStewardReviewTick,
+  runStewardBriefTick,
+  runStewardPromotionTick,
+} from "./steward.mjs";
 
 const STATE = path.join(DIR, "state.json");
 // Lives beside the state, not in the repo tree: it is generated, per-machine,
@@ -1084,6 +1089,21 @@ ${
   A miss reported three times is a rule that has not been written yet (L3): the recurring
   ones below belong in <code>docs/build-rules.md</code>, and then the note comes off the board.</p>
 ${missHtml}
+${(() => {
+  // STEWARD RULE PROPOSALS — duty 4's output. A proposal is a patch the
+  // maintainer can paste into docs/build-rules.md; applying it is the
+  // maintainer's edit — the steward never writes rules (C4).
+  const proposals = board.filter(([, v]) => v && v.by === "steward" && v.value && v.value.startsWith("STEWARD RULE PROPOSAL"));
+  if (!proposals.length) return "";
+  return `<h3>Rule proposals waiting on a maintainer (${proposals.length})</h3>
+    ${proposals
+      .map(
+        ([k, v]) => `<details class="lock"><summary><b>${esc(k)}</b>
+          <span class="mut">${esc(ago(v.at))}</span></summary>
+          <p>${esc(v.value)}</p></details>`
+      )
+      .join("")}`;
+})()}
 
 <h2>Blockers (${openBlocks.length} open)</h2>
 <p class="mut">Agents report what they are blocked on (<code>block(what, needed)</code>) and the bus
@@ -1767,6 +1787,34 @@ function runDashboard(port) {
           process.stdout.write("steward: runner unreachable for briefs — triaged defects stay brief-less and will retry\n");
         else if (brf.drafted)
           process.stdout.write(`steward: drafted ${brf.drafted} brief(s) (awaiting approval)\n`);
+        // Duty 4: a miss reported three times is a rule that has not been
+        // written yet (L3). The steward proposes the rule — shaped exactly like
+        // the rulebook's own — as a board note the maintainer can paste into
+        // docs/build-rules.md. The steward NEVER writes the rulebook (C4).
+        let promotionRunner = runner;
+        if (process.env.STEWARD_PROMOTION_RUNNER) {
+          try {
+            promotionRunner = findRunner(process.env.STEWARD_PROMOTION_RUNNER);
+          } catch {
+            /* fall back to the triage runner */
+          }
+        }
+        let rulebook = null;
+        try {
+          rulebook = fs.readFileSync(path.join(docsDir(), "build-rules.md"), "utf8");
+        } catch {
+          /* no rulebook yet — proposals are still fine, nothing to collide with */
+        }
+        const prm = await runStewardPromotionTick({
+          readState: () => withState((s) => s),
+          writeState: (fn) => withState(fn),
+          ask: (prompt) => askRunner(promotionRunner, prompt),
+          rulebook,
+        });
+        if (prm.offline)
+          process.stdout.write("steward: runner unreachable for promotion — recurring misses stay proposal-less and will retry\n");
+        else if (prm.promoted)
+          process.stdout.write(`steward: processed ${prm.promoted} promotion signal(s)\n`);
       } catch (err) {
         process.stdout.write(`steward: tick failed: ${err?.message ?? err}\n`);
       } finally {

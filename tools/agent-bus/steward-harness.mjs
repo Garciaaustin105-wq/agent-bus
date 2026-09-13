@@ -21,6 +21,10 @@ import {
   runStewardReviewTick,
   runStewardBriefTick,
   parseTriage,
+  parsePromotion,
+  promotionPrompt,
+  promotionSignalsFor,
+  runStewardPromotionTick,
   runStewardTick,
   signalsFor,
   triagePrompt,
@@ -518,6 +522,150 @@ await check("duty 1 -> duty 3: a defect triage becomes a brief signal, a lesson 
     ask: async () => JSON.stringify({ kind: "lesson", duplicateOf: null, reason: "process, not code" }),
   });
   assert.deepEqual(state2.steward.defects ?? [], [], "a lesson is not a fix task");
+});
+
+// ── duty 4: lesson promotion ────────────────────────────────────────────────
+
+const GOOD_PROPOSAL = JSON.stringify({
+  rule: "### B7. A counter the board shows must come from the data the board stores.\n\nA count rendered from a value nobody wrote is a guess wearing a number. Derive it, or say it is unknown.",
+  reason: "The same wrong-count miss has recurred three times from different callers.",
+  source: "miss-count-from-thin-air",
+});
+const RULEBOOK_MD = [
+  "## B. Being honest about data",
+  "### B1. A blank is not a zero.",
+  "body",
+].join("\n");
+
+const missBoard = (seen) => ({
+  "miss-count-from-thin-air": {
+    value: "SELF-REPORTED MISS. CLAIMED: the count. TRUE: it was a guess.",
+    by: "someone",
+    at: "2026-09-13T00:00:00Z",
+    miss: true,
+    seen,
+  },
+});
+
+await check("promotionSignalsFor: picks misses at the L3 threshold, skips the rest, capped", () => {
+  const hot = promotionSignalsFor(
+    stateWith(missBoard(3), [])
+  );
+  assert.equal(hot.length, 1);
+  assert.equal(hot[0].id, "promotion:miss-count-from-thin-air");
+  assert.equal(hot[0].seen, 3, "the seen count rides the signal — the proposal cites it");
+  assert.equal(promotionSignalsFor(stateWith(missBoard(2), [])).length, 0, "below L3, the steward is quiet");
+  assert.equal(promotionSignalsFor(stateWith(missBoard(1), [])).length, 0);
+  const many = stateWith({}, []);
+  for (let i = 0; i < 7; i++) {
+    many.board[`miss-pattern-${i}`] = { value: "v", by: "s", at: "t", miss: true, seen: 4 };
+  }
+  assert.equal(promotionSignalsFor(many).length, 5, "capped like every other signal source");
+});
+
+await check("promotionSignalsFor: already-promoted misses are not returned twice", () => {
+  const state = stateWith(missBoard(3), []);
+  state.steward.promoted = ["promotion:miss-count-from-thin-air"];
+  assert.equal(promotionSignalsFor(state).length, 0);
+});
+
+await check("promotionPrompt: carries the miss, the existing ids and the demanded shape", () => {
+  const prompt = promotionPrompt(
+    { id: "promotion:miss-x", key: "miss-x", seen: 3, value: "CLAIMED: A. TRUE: B." },
+    ["B1", "C4", "G3"]
+  );
+  assert.match(prompt, /CLAIMED: A\. TRUE: B\./);
+  assert.match(prompt, /B1, C4, G3/, "the model proposes into the rulebook's actual numbering");
+  assert.match(prompt, /### <id>\. <title>/, "the rulebook's own heading grammar is demanded");
+  assert.match(prompt, /3 reports/);
+  const empty = promotionPrompt({ id: "x", key: "x", seen: 3, value: "v" }, []);
+  assert.match(empty, /currently has none/);
+});
+
+await check("parsePromotion: a good proposal parses to a rule + reason + id; garbage does not", () => {
+  const good = parsePromotion(`\`\`\`json\n${GOOD_PROPOSAL}\n\`\`\``);
+  assert.equal(good.rule.startsWith("### B7. "), true, "fences stripped, heading intact");
+  assert.equal(good.id, "B7");
+  assert.match(good.reason, /recurred/);
+  assert.ok(parsePromotion("not json at all").error);
+  assert.ok(parsePromotion(JSON.stringify({ rule: "### B7. Title", reason: "" })).error, "a proposal without its why is not reviewable");
+  assert.ok(parsePromotion(JSON.stringify({ rule: "just words", reason: "why" })).error, "no heading = not the rulebook's shape");
+  assert.ok(parsePromotion(JSON.stringify({ rule: "### B7. Title", reason: "why" })).error, "a heading with no body is not a rule");
+  assert.ok(parsePromotion(JSON.stringify({ rule: "### B7. Title\nbody", reason: "why" })).error, "too short to be a rule");
+});
+
+await check("runStewardPromotionTick: files a PROPOSAL note with provenance, marks once, second tick is a no-op", async () => {
+  const state = stateWith(missBoard(3), []);
+  const res = await runStewardPromotionTick({
+    readState: () => state,
+    writeState: (fn) => fn(state),
+    ask: async () => GOOD_PROPOSAL,
+    rulebook: RULEBOOK_MD,
+  });
+  assert.equal(res.promoted, 1);
+  const note = state.board["steward-rule-proposal-miss-count-from-thin-air"];
+  assert.ok(note, "the proposal lands on the board, not in the rulebook");
+  assert.equal(note.by, "steward");
+  assert.match(note.value, /STEWARD RULE PROPOSAL/);
+  assert.match(note.value, /MAINTAINER'S edit — the steward never writes rules \(C4\)/, "the human gate is in the proposal's own text");
+  assert.match(note.value, /### B7\./, "ready to paste into build-rules.md as-is");
+  assert.match(note.value, /reported 3 times/);
+  assert.equal(state.steward.promoted.length, 1);
+  const again = await runStewardPromotionTick({
+    readState: () => state,
+    writeState: (fn) => fn(state),
+    ask: async () => { throw new Error("should not be asked again"); },
+    rulebook: RULEBOOK_MD,
+  });
+  assert.equal(again.promoted, 0);
+  assert.equal(Object.keys(state.board).length, 2, "one miss, one proposal, never a second (the miss itself stays on the board)");
+});
+
+await check("runStewardPromotionTick: a proposed id that already exists in the rulebook is unusable, reported once", async () => {
+  const collision = JSON.parse(GOOD_PROPOSAL);
+  collision.rule = collision.rule.replace("B7", "B1");
+  const state = stateWith(missBoard(3), []);
+  let attempts = 0;
+  const res = await runStewardPromotionTick({
+    readState: () => state,
+    writeState: (fn) => fn(state),
+    ask: async () => { attempts++; return JSON.stringify(collision); },
+    rulebook: RULEBOOK_MD,
+  });
+  assert.equal(res.promoted, 1, "the signal is settled — filed as unusable");
+  assert.equal(attempts, 1, "never a token furnace");
+  assert.ok(state.board["steward-rule-unusable-miss-count-from-thin-air"]);
+  assert.match(state.board["steward-rule-unusable-miss-count-from-thin-air"].value, /B1 already exists/);
+  assert.ok(!state.board["steward-rule-proposal-miss-count-from-thin-air"], "a colliding rule never files as a proposal");
+  assert.equal(state.steward.promoted.length, 1);
+});
+
+await check("runStewardPromotionTick: garbage answers are unusable once, not retried", async () => {
+  const state = stateWith(missBoard(4), []);
+  let attempts = 0;
+  const res = await runStewardPromotionTick({
+    readState: () => state,
+    writeState: (fn) => fn(state),
+    ask: async () => { attempts++; return "I think we should write a rule about counters maybe"; },
+    rulebook: RULEBOOK_MD,
+  });
+  assert.equal(res.promoted, 1);
+  assert.equal(attempts, 1);
+  assert.ok(state.board["steward-rule-unusable-miss-count-from-thin-air"]);
+  assert.equal(state.steward.promoted.length, 1);
+});
+
+await check("runStewardPromotionTick: transport failure files ONE offline note, marks nothing", async () => {
+  const state = stateWith(missBoard(3), []);
+  const res = await runStewardPromotionTick({
+    readState: () => state,
+    writeState: (fn) => fn(state),
+    ask: async () => { throw new Error("connection refused"); },
+    rulebook: RULEBOOK_MD,
+  });
+  assert.equal(res.offline, true);
+  assert.ok(state.board["steward/offline"]);
+  assert.equal(state.steward.promoted?.length ?? 0, 0, "signals remain retryable");
 });
 
 summary();
