@@ -70,8 +70,8 @@ t("initialize returns a protocol version", !!init.result?.protocolVersion, JSON.
 t("...and identifies the server", init.result?.serverInfo?.name === "agent-bus");
 await b.rpc("initialize", {});
 const list = await a.rpc("tools/list", {});
-t("tools/list returns the tool set — including the review and publish surfaces",
-  (list.result?.tools?.length ?? 0) === 22,
+t("tools/list returns the tool set — including the review, apply and publish surfaces",
+  (list.result?.tools?.length ?? 0) === 23,
   `got ${list.result?.tools?.length}`);
 t("every tool declares an input schema",
   list.result.tools.every((x) => x.inputSchema && x.inputSchema.type === "object"));
@@ -301,6 +301,33 @@ t("a status question gets the bus state back",
   namedCli("runner2", "inbox", "runner2").includes("HUB STATUS"));
 t("an empty poll is quiet", hubOnce().includes("(quiet)"));
 fs.rmSync(proj2, { recursive: true, force: true });
+
+console.log("\n[apply — a draft brief becomes work]");
+// A steward duty-3 draft, seeded the way the steward writes it: status "draft",
+// unclaimable until a person dispatches it. The server holds no cached state,
+// so a direct write is what the bus will read on the next call.
+const homeState = path.join(HOME, ".agent-bus", "state.json");
+const seeded = JSON.parse(fs.readFileSync(homeState, "utf8"));
+seeded.taskSeq = Math.max(seeded.taskSeq ?? 0, 99);
+seeded.tasks.push({
+  id: "t99", lane: "fixes", title: "Brief draft: export 404",
+  prompt: "PROBLEM: the export button 404s.", status: "draft",
+  briefDraftFor: "note:defect/export-404", runner_id: null, stage: null,
+  by: "steward", at: new Date().toISOString(),
+});
+fs.writeFileSync(homeState, JSON.stringify(seeded, null, 2));
+
+const applied = await a.call("apply", { task_id: "t99", notes: "brief reads right" });
+t("apply turns a DRAFT brief into queued work", !applied.isError && applied.text.includes("Dispatched t99"), applied.text);
+const afterApply = JSON.parse(fs.readFileSync(homeState, "utf8"));
+const t99 = afterApply.tasks.find((x) => x.id === "t99");
+t("...the task is queued, claimable", t99.status === "queued");
+t("...and the dispatch is stamped on the task's review timeline",
+  t99.reviews?.length === 1 && t99.reviews[0].verdict === "approve" && t99.reviews[0].via === "apply" && t99.reviews[0].by === "lane-d");
+const again = await a.call("apply", { task_id: "t99" });
+t("a second apply is refused — queued is already work", again.isError && again.text.includes("already work"), again.text);
+const ghost = await a.call("apply", { task_id: "t999" });
+t("apply on an unknown id is refused with the queue pointer", ghost.isError && ghost.text.includes("No task"), ghost.text);
 
 console.log("\n[bad input never takes the server down]");
 t("unknown tool errors without dying", (await a.call("no_such_tool")).isError);

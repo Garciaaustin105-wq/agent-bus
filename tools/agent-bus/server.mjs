@@ -664,6 +664,19 @@ const TOOLS = [
     },
   },
   {
+    name: "apply",
+    description:
+      "Turn a DRAFT brief into work — the orchestrator's one-word dispatch. A steward-drafted brief sits as a task in status \"draft\", unclaimable until a person (or an agent acting on one) applies it. apply is that act, on the record: the task enters the queue and the apply is stamped on the task's review timeline. Nothing auto-applies — this verb is the hand on the key; refusing everything that is not a draft keeps it from becoming a second claim path.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task_id: { type: "string", description: "The draft task id, e.g. t5." },
+        notes: { type: "string", description: "Optional — anything the orchestrator wants on the record with the dispatch." },
+      },
+      required: ["task_id"],
+    },
+  },
+  {
     name: "publish",
     description:
       "Record that a build SHIPPED: which version, what went out. The per-space publish record is the spine's Publish stage made durable — 'it shipped' stops being whatever the last message claimed and becomes a dated entry a person can audit.",
@@ -1085,6 +1098,44 @@ function callTool(name, args) {
           (dispatching ? " — draft brief approved, DISPATCHED to the queue" : "") +
           (notes ? ` — ${notes.slice(0, 200)}` : "") +
           ". The verdict is stamped on the task record.";
+      });
+    }
+
+    // The other half of the draft gate, as its own verb. `review` is a VERDICT
+    // on a finished draft; `apply` is the act of making a draft WORK — the
+    // orchestrator read the brief and takes it into the queue, one word, on the
+    // record. Scoped to status "draft" only, on purpose: a queued task already
+    // IS work, and apply refusing everything else keeps it from becoming a
+    // second claim path or a way to re-queue finished work. The dispatch still
+    // lands on the task's review timeline (verdict "approve", via "apply") —
+    // one timeline, not two. C4 is untouched: nothing calls this but a person
+    // at a keyboard (or an agent they sent); the steward's ticks never do.
+    case "apply": {
+      const taskId = String(args.task_id || "").trim();
+      const notes = cap(String(args.notes || "").trim(), MAX_NOTE_CHARS);
+      if (!taskId) throw new Error("`task_id` is required — which draft becomes work?");
+      const me = requireName();
+      return withState((state) => {
+        touch(state);
+        const task = (state.tasks ?? []).find((t) => t.id === taskId);
+        if (!task) throw new Error(`No task "${taskId}". tasks() lists the queue.`);
+        if (task.status !== "draft") {
+          throw new Error(
+            `Task ${taskId} is ${task.status} — apply takes a DRAFT brief. ` +
+              (task.status === "queued" || task.status === "running"
+                ? "It is already work; claim hands it out."
+                : task.status === "done"
+                  ? "It already finished."
+                  : "It failed — task it again instead of re-applying it.")
+          );
+        }
+        task.reviews ??= [];
+        task.reviews.push({ verdict: "approve", by: me, via: "apply", notes: notes || null, at: nowIso() });
+        if (task.reviews.length > 10) task.reviews = task.reviews.slice(-10);
+        task.status = "queued";
+        return `Dispatched ${taskId} — the brief is work now, in the queue.` +
+          (notes ? ` — ${notes.slice(0, 200)}` : "") +
+          ` Applied by ${me}, on the record.`;
       });
     }
 
@@ -2042,6 +2093,12 @@ function runCli(argv) {
         myName = process.env.AGENT_BUS_NAME || "cli";
         return say(callTool("review", { task_id: taskId, verdict, notes: n.join(" ") }));
       }
+      // The draft gate from a shell — one word: this brief becomes work.
+      case "apply": {
+        const [taskId, ...n] = rest;
+        myName = process.env.AGENT_BUS_NAME || "cli";
+        return say(callTool("apply", { task_id: taskId, notes: n.join(" ") }));
+      }
       // The spine's Publish stage from a shell.
       case "publish": {
         const [version, ...w] = rest;
@@ -2198,6 +2255,8 @@ function runCli(argv) {
         say("                      run the enabled local runners against fixed prompts; only on your ask");
         say("  review <task-id> <approve|changes> [notes]");
         say("                      stamp a review verdict on a finished draft");
+        say("  apply <task-id> [notes]");
+        say("                      turn a DRAFT brief into queued work (the dispatch)");
         say("  publish <version> <what...>");
         say("                      record that a build shipped");
         say("  projects | project_add <name> <root> | project_remove <name>");

@@ -1254,7 +1254,7 @@ function taskPageHtml(id, flash, proj) {
       <input type="hidden" name="task_id" value="${esc(task.id)}">
       <input type="hidden" name="back" value="${esc(postUrl)}">
       <label class="mut">${task.status === "draft"
-        ? "This is the steward's DRAFT brief. Approving it dispatches the task to the queue; changes leaves it a draft with your notes on it."
+        ? `This is the steward's DRAFT brief. Approving it dispatches the task to the queue; changes leaves it a draft with your notes on it. From a shell it is one word: <code>server.mjs apply ${esc(task.id)}</code>.`
         : "Your review — the worker cannot review its own task"}</label>
       <div class="row">
         <select name="verdict"><option value="approve">${task.status === "draft" ? "approve (dispatch)" : "approve"}</option><option value="changes">changes</option></select>

@@ -138,7 +138,7 @@ the OS whether that process still exists — an agent working locally between bu
 calls shows a **running** badge for free, no heartbeat required. First-contact
 CLI verbs (`note`, `inbox`, `block`, `claim`) join the registry — that is how
 the first-time rules and the hub agent's greeting find a new agent. Ledger-only
-verbs an already-working agent runs (`task`, `review`, `send`, `miss`,
+verbs an already-working agent runs (`task`, `review`, `apply`, `send`, `miss`,
 `publish`, `unblock`, `release`) do not re-announce — the board's ledger
 already carries their name, and a card for a process that already died is
 noise. A registered agent on another machine (its pid cannot be checked here)
