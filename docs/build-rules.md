@@ -267,6 +267,25 @@ Both belong in the file. Mixing them into one index is what fails.
 response to fix code, or to edit prose? If it is prose, the check is wired
 wrong.
 
+### E6. A release audit runs the product once, as the person will.
+
+Suites and gates verify code paths; they do not verify what a person watching
+the product concludes. Before calling a release audited, run one live pass of
+the real flow — dispatch, drain, render the dashboard, whatever the feature
+actually looks like in use — and check every state it shows against what a
+reasonable watcher would take it to mean.
+
+**Why:** every suite can be green while the visible surface lies. Suites
+assert code; the person reads prose rendered from data, and that prose is
+where honesty defects live.
+
+**Incident:** the v0.1.1 release audit passed all 14 suites and shipped two
+dashboard honesty defects: a Connected badge that said "running" whenever the
+agent's process was alive — including over an empty queue — and a working-tree
+card that said "free" without naming which tree the lock covered. The person
+caught both from the outside within a day. The audit's blind spot was exactly
+the gap between "the tests pass" and "what the page says is true".
+
 ## F. Working alongside other agents
 
 ### F1. Claim the working tree before you touch git in a shared checkout.
@@ -324,6 +343,27 @@ rule G1 above and the runner-prefs handoff protocol came to exist.
 
 **Why:** F2 — a fact that reaches only whoever is listening is lost. A block
 reported to the hub is a fact; a block retold in a chat is a rumor.
+
+### G3. A problem the PERSON reports goes into the hub first — before you fix it.
+
+G2 covers a problem you hit. This one covers a problem handed to you. Post it
+to the board under a fresh, distinct note key the same turn it arrives — an
+essence of what was reported plus the date — and only then start diagnosing.
+When the fix ships, follow up under the same key with what changed and the
+evidence it works.
+
+**Why:** the reporter is not the one keeping the record. If you fix first and
+record later, the session can end before "later" — a compaction, a context
+reset, a handoff — and the report dies with the conversation while the defect
+it described may still be in someone else's copy. The person should never have
+to ask whether it was written down, and another agent picking up the same bus
+should find the problem and its fix without either of you in the room.
+
+**Incident:** 2026-09-13, two dashboard honesty defects reported mid-session.
+The fixes were made but nothing was recorded until the person asked — twice.
+The second ask was the rule: "I shouldn't have to keep asking you to save."
+The capture must not depend on one agent remembering; it is a step of the work,
+like the fix itself.
 
 ---
 

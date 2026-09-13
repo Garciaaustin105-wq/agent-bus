@@ -499,7 +499,7 @@ const TOOLS = [
   {
     name: "note",
     description:
-      "Post a durable fact to the noticeboard, keyed so it can be overwritten as things change. This is for what the NEXT agent needs to know regardless of whether they were listening: 'the table pattern moved to DataTable', 'Lane C already ships ComponentsPanel'. Four stale-spec incidents in this repo happened because facts like these lived only in a conversation.",
+      "Post a durable fact to the noticeboard, keyed so it can be overwritten as things change. This is for what the NEXT agent needs to know regardless of whether they were listening: 'the table pattern moved to DataTable', 'Lane C already ships ComponentsPanel'. Four stale-spec incidents in this repo happened because facts like these lived only in a conversation. A problem the PERSON reports goes here FIRST, under a fresh key, before you fix it (rule G3) — then a follow-up note under the same key with the fix. A problem you hit yourself goes here too (rule G2).",
     inputSchema: {
       type: "object",
       properties: {
