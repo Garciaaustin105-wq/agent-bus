@@ -484,6 +484,22 @@ await check("the savings counter renders total and this-session from RECORDED us
   assert.ok(html.includes("measured, not estimated"), "the counter says where its numbers come from");
 });
 
+await check("a RUNNING task shows beside the tree lock even when the tree is free", async () => {
+  const stPath = path.join(stateDir, "state.json");
+  const seed = JSON.parse(fs.readFileSync(stPath, "utf8"));
+  seed.taskSeq = (seed.taskSeq ?? 0) + 1;
+  seed.tasks.push({
+    id: `t${seed.taskSeq}`, lane: "test", title: "tree context",
+    prompt: "x", status: "running", at: new Date().toISOString(),
+  });
+  fs.writeFileSync(stPath, JSON.stringify(seed, null, 2));
+  const html = await (await GET(`${base}/`)).text();
+  assert.ok(
+    html.includes("task is running right now") || html.includes("tasks are running right now"),
+    "the running-task context line renders beside a free lock"
+  );
+});
+
 await check("a DRAFT brief is dispatch-gated: approve queues it, changes leaves it unclaimed", async () => {
   const stPath = path.join(stateDir, "state.json");
   const seed = JSON.parse(fs.readFileSync(stPath, "utf8"));

@@ -518,6 +518,9 @@ function renderStatusHtml(state, opts = {}) {
   const now = Date.now();
   // "This session" in the savings counter = since this hub process started.
   const savings = savingsOf(state, now - process.uptime() * 1000);
+  // Shown beside the tree lock: lane workers run tasks without claiming the
+  // tree, so "free" needs its own context or it reads as "nothing is going on".
+  const runningTasks = (state.tasks ?? []).filter((t) => t.status === "running").length;
   const ago = (iso) => {
     const s = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
     if (s < 60) return `${s}s ago`;
@@ -1030,6 +1033,11 @@ ${costHtml}
 
 <h2>Working tree</h2>
 <div class="lock${held ? " held" : ""}">${esc(describeLock(lock))}</div>
+${
+  !held && runningTasks > 0
+    ? `<p class="mut">The tree itself is unclaimed, but <b>${runningTasks} task${runningTasks === 1 ? " is" : "s are"} running right now</b> — lane workers take queued tasks without holding the tree (the lock is for editing this checkout, not for running work).</p>`
+    : ""
+}
 <p class="mut">The lock covers <span class="path">${esc(repo)}</span> — this
   space's checkout only. Work in another project's tree never shows here
   (dogfood report 2026-09-13: "free" on the hub page while camera work ran,

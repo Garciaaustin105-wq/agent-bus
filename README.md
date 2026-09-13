@@ -193,14 +193,14 @@ node tools/agent-bus/blockers-harness.mjs     # 24 — blocker matching + the fi
 node tools/agent-bus/routing-harness.mjs      # 17 — runner routing from the fleet's own record
 node tools/agent-bus/runner-limits-harness.mjs # 16 — per-runner budgets
 node tools/agent-bus/worker-tasks-harness.mjs # 12 — task queue state layer + state-growth caps
-node tools/agent-bus/hub-http-harness.mjs     # 23 — dashboard HTTP edge, one-hub rule, savings counter, app spaces
+node tools/agent-bus/hub-http-harness.mjs     # 24 — dashboard HTTP edge, one-hub rule, savings counter, app spaces
 node tools/agent-bus/projects-harness.mjs     # 13 — the app-space registry + cross-space reads
 node tools/agent-bus/steward-harness.mjs      # 40 — the steward's four duties, against a fake classifier
 node tools/agent-bus/bench-harness.mjs        # 23 — the bench contract: never deletes, hardware-gated
 node tools/agent-bus/lock-harness.mjs         # 5  — state lock staleness and identity
 ```
 
-388 checks in total. All suites use temp dirs and never touch real state.
+389 checks in total. All suites use temp dirs and never touch real state.
 
 ## Learning across installs
 
