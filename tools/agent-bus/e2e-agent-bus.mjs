@@ -58,6 +58,7 @@ function session(label) {
       return { text: r.result?.content?.[0]?.text ?? "", isError: !!r.result?.isError };
     },
     kill: () => proc.kill(),
+    proc,
   };
 }
 
@@ -93,6 +94,16 @@ t("...and its lane", roster.text.includes("desktop pass"));
 t("...and knows which one is itself", roster.text.includes("(you)"));
 const dup = await b.call("register", { name: "lane-d" });
 t("a live name cannot be taken twice", dup.isError && dup.text.includes("already registered"));
+// The restart case: the app is closed and reopened inside the hour. The old
+// server process is gone, so its name must come back at once, not in an hour.
+const closing = session("closing");
+await closing.rpc("initialize", {});
+await closing.call("register", { name: "restarted", lane: "before the restart" });
+await new Promise((resolve) => { closing.proc.once("exit", resolve); closing.kill(); });
+const reopened = await b.call("register", { name: "restarted", lane: "after the restart" });
+t("a name whose process has exited is free at once — a restarted session takes it back",
+  !reopened.isError && reopened.text.includes("restarted"), reopened.text);
+await b.call("register", { name: "opus-desktop", lane: "desktop pass" });
 
 console.log("\n[the working-tree lock — the point of the exercise]");
 const claimed = await a.call("claim_tree", { path: "C:/repo", reason: "rebase lane D", minutes: 5 });

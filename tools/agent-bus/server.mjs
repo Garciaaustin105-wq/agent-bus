@@ -716,7 +716,13 @@ function callTool(name, args) {
       return withState((state) => {
         pruneAgents(state);
         const existing = state.agents[wanted];
-        if (existing && existing.sessionKey !== SESSION_KEY) {
+        // A holder whose recorded process is provably gone on THIS machine is
+        // a session that was closed or restarted: its name is free now, not an
+        // hour from now. No pid (an older server) or another host's pid proves
+        // nothing, so those keep the hour.
+        const holderGone = Boolean(existing?.pid) &&
+          (!existing.host || existing.host === os.hostname()) && !pidAlive(existing.pid);
+        if (existing && existing.sessionKey !== SESSION_KEY && !holderGone) {
           const age = Date.now() - Date.parse(existing.lastSeen ?? 0);
           if (age < 60 * 60 * 1000) {
             throw new Error(
