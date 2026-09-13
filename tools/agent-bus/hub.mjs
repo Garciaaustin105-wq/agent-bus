@@ -44,6 +44,7 @@ import {
   withState,
 } from "./server.mjs";
 import { readRegistry, resolveProject } from "./projects.mjs";
+import { runStewardTick } from "./steward.mjs";
 
 const STATE = path.join(DIR, "state.json");
 // Lives beside the state, not in the repo tree: it is generated, per-machine,
@@ -1679,6 +1680,50 @@ function runDashboard(port) {
     // up within a second, whichever process made it.
     refreshPage(true);
     fs.watchFile(STATE, { interval: 1000 }, () => refreshPage());
+
+    // THE STEWARD — duty 1 (triage). A problem note under defect/|problem/|audit/
+    // or a task that FAILED is a signal the steward owes a triage to: a filed
+    // steward-triage- note (defect / lesson / routing-fact / duplicate / unclear)
+    // with provenance and the human-verdict gate still in front of it. The policy
+    // lives in steward.mjs, proven by steward-harness without a model; this loop
+    // is only the wiring — read, ask, write. C4 holds: the steward files, it
+    // never opens tasks, edits rules or touches another agent's note.
+    //
+    // The runner is the local fleet's default, overridable; with no enabled
+    // runner the loop is a no-op and the bus is exactly what it was before —
+    // the same absence-changes-nothing rule the Ollama integration has kept.
+    // One tick at a time: a slow model must not stack ticks. A tick that dies
+    // is logged and the loop lives — the steward must not become a way to
+    // crash the dashboard.
+    const STEWARD_INTERVAL_MS = 60_000;
+    let stewardBusy = false;
+    const stewardTick = async () => {
+      if (stewardBusy) return;
+      stewardBusy = true;
+      try {
+        let runner;
+        try {
+          runner = findRunner(process.env.STEWARD_RUNNER || "qwen2.5:7b");
+        } catch {
+          return; // no enabled runner — the steward stays dormant, bus unchanged
+        }
+        const res = await runStewardTick({
+          readState: () => withState((s) => s),
+          writeState: (fn) => withState(fn),
+          ask: (prompt) => askRunner(runner, prompt),
+        });
+        if (res.offline)
+          process.stdout.write("steward: runner unreachable — signals stay un-triaged and will retry\n");
+        else if (res.triaged)
+          process.stdout.write(`steward: triaged ${res.triaged} signal(s)\n`);
+      } catch (err) {
+        process.stdout.write(`steward: tick failed: ${err?.message ?? err}\n`);
+      } finally {
+        stewardBusy = false;
+      }
+    };
+    setTimeout(stewardTick, 5_000);
+    setInterval(stewardTick, STEWARD_INTERVAL_MS);
   });
 }
 

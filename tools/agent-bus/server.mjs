@@ -244,8 +244,16 @@ function withState(fn) {
     let state;
     try {
       state = JSON.parse(fs.readFileSync(STATE, "utf8"));
-    } catch {
-      state = null;
+    } catch (err) {
+      // Absent is the first boot — an empty base is correct. Present-but-
+      // unreadable (a corrupt file, a permission slip) is NOT: starting from
+      // an empty base here would silently overwrite the whole bus — every
+      // note, task and lesson gone with the next write. Fail loudly instead;
+      // the person recovers the file, the bus does not destroy it. Found
+      // live while two hub processes raced one state file during the
+      // steward's smoke test (2026-09-13).
+      if (err.code === "ENOENT") state = null;
+      else throw err;
     }
     if (!state || typeof state !== "object") {
       state = { agents: {}, lock: null, messages: [], board: {}, tasks: [], taskSeq: 0, publishes: [] };
