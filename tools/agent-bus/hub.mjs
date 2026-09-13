@@ -21,6 +21,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { LIVE_MS, readSessions } from "./sessions.mjs";
+import { compactionSavings } from "./token-watch.mjs";
 import { extractHistory, routingVerdicts } from "./routing.mjs";
 import { pathToFileURL } from "node:url";
 import {
@@ -482,15 +483,15 @@ setInterval(async () => {
 }, 4000);
 </script>`;
 
-// The savings counter, in TOKENS ONLY (the user's decision, 2026-09-13: no
-// dollar figures — every cloud agent prices differently and any stated rate
-// can be miscalculated, so the bus reports the one unit that is measured
-// exactly and leaves pricing to the person). Every local task records exact
-// usage {prompt, output} from the model server; those tokens are the work a
-// cloud-based agent never billed. The context-cost view above stays the
-// cloud side — what cloud sessions actually burned — and the two kinds are
-// never summed.
-function savingsOf(state, sinceMs) {
+// The local-model work counter, DEMOTED to a plain fact (the user's decisive
+// reframing, 2026-09-13: "i dont care about the savings done by using local
+// agents... the point of token saved was by compacting sessions and bus to
+// help cloud agents not have to reread everything"). This is no longer called
+// savings — the savings headline is compaction (token-watch.mjs::
+// compactionSavings). This number stays because it is exact and useful: every
+// local task records usage {prompt, output} from the model server, and the
+// panel renders it as "Work your model ran", never "saved".
+function modelWorkOf(state, sinceMs) {
   const sum = (tasks) => {
     let prompt = 0, output = 0, n = 0;
     for (const t of tasks) {
@@ -518,8 +519,8 @@ function renderStatusHtml(state, opts = {}) {
   const projQ = opts.proj && !opts.proj.own ? `?p=${encodeURIComponent(opts.proj.name)}` : "";
   pruneAgents(state);
   const now = Date.now();
-  // "This session" in the savings counter = since this hub process started.
-  const savings = savingsOf(state, now - process.uptime() * 1000);
+  // "Since the hub started" in the model-work fact = since this process started.
+  const modelWork = modelWorkOf(state, now - process.uptime() * 1000);
   // Shown beside the tree lock: lane workers run tasks without claiming the
   // tree, so "free" needs its own context or it reads as "nothing is going on".
   const runningTasks = (state.tasks ?? []).filter((t) => t.status === "running").length;
@@ -858,14 +859,30 @@ function renderStatusHtml(state, opts = {}) {
     return hr < 48 ? hr + "h" : Math.round(hr / 24) + "d";
   };
 
+  // THE SAVINGS HEADLINE is compaction (request/saved-counter-final-shape,
+  // the user's decisive reframing). What compacting saved is exact: the
+  // context a session dropped, multiplied by every turn it ran after — the
+  // re-read it never paid. Aligned to tokens.rows so the per-session rows can
+  // carry their own numbers.
+  const compaction = compactionSavings(
+    tokens.missing || !tokens.totals ? [] : tokens.rows.map((r) => r.scan)
+  );
+  const compactionBySession = (tokens.rows ?? [])
+    .map((r, i) => ({ id: r.id, idle: r.idle, ...compaction.per[i] }))
+    .filter((x) => x.tokens > 0)
+    .sort((a, b) => b.tokens - a.tokens);
+  const liveSaved = (tokens.rows ?? []).reduce(
+    (a, r, i) => a + (r.idle < LIVE_MS ? (compaction.per[i]?.tokens || 0) : 0),
+    0
+  );
+
   // THE SESSIONS LIST, inside the saved panel (request/all-sessions-in-saved).
-  // Every session visible in one place: the saved rows are local tasks; the
-  // Claude Code sessions that share this project are listed with what they
-  // BURNED, read from the local transcripts by readSessions() — never asked of
-  // a cloud agent (there is nothing to ask and no account to ask with), and
-  // never summed into saved, because burned was billed to you and saved was
-  // not. A fresh install with no records gets honest empty states, never a
-  // fabricated baseline.
+  // Every session visible in one place: the cloud sessions are listed with
+  // what they BURNED, read from the local transcripts by readSessions() —
+  // never asked of a cloud agent (there is nothing to ask and no account to
+  // ask with), and never summed into saved, because burned was billed to you
+  // and saved was not. A fresh install with no records gets honest empty
+  // states, never a fabricated baseline.
   const sessionRows =
     tokens.missing || !tokens.totals || !tokens.totals.turns
       ? []
@@ -1058,19 +1075,41 @@ ${hardwareHtml()}
 <h2>The context budget</h2>
 ${costHtml}
 
-<h2>Tokens saved — work a cloud-based agent never billed</h2>
+<h2>Tokens saved — re-reads cloud sessions never paid</h2>
 <div class="card">
-  <div style="font-size:24px">saved so far: <b>${(savings.total.prompt + savings.total.output).toLocaleString()} tokens</b></div>
-  <div class="mut" style="padding-top:2px">${savings.total.prompt.toLocaleString()} input +
-    ${savings.total.output.toLocaleString()} output, over ${savings.total.n} task${savings.total.n === 1 ? "" : "s"} that ran on your own model — all time</div>
-  <div style="padding-top:6px">This session: <b>${(savings.session.prompt + savings.session.output).toLocaleString()} tokens</b>
-    <span class="mut">over ${savings.session.n} task${savings.session.n === 1 ? "" : "s"}, since the hub started</span></div>
-  <p class="mut">Counted exactly from each task's usage record — tokens that
-    would have been billed to a cloud-based agent. No dollar figures on
-    purpose: every cloud agent prices differently, so the bus reports the
-    one unit that is exact and leaves pricing to you. The context budget
-    above is the other side — what cloud sessions actually burned — and the
-    two are never summed.</p>
+  <div style="font-size:24px">saved by compacting: <b>${compaction.total.toLocaleString()} tokens</b></div>
+  <div class="mut" style="padding-top:2px">over ${compaction.events} compaction${compaction.events === 1 ? "" : "s"} —
+    the context each session dropped, multiplied by every turn it ran after that.
+    Counted exactly from the transcripts; the drop is real, and so is the turn count.</div>
+  ${
+    liveSaved > 0
+      ? `<div style="padding-top:6px">In sessions still running: <b>${liveSaved.toLocaleString()} tokens</b></div>`
+      : ""
+  }
+  ${
+    tokens.missing || !tokens.totals
+      ? `<p class="mut">No Claude Code transcripts for this project yet — the
+    count starts as sessions happen, and nothing is estimated to fill the
+    blank.</p>`
+      : compactionBySession.length
+        ? `<table class="tw" style="margin-top:8px">
+    <tr><th>session</th><th class="num">compactions</th><th class="num">saved</th></tr>
+    ${compactionBySession
+      .map(
+        (x) => `<tr><td>${esc(x.id)}${x.idle < LIVE_MS ? ' <span class="mutcell">live</span>' : ""}</td>
+        <td class="num">${x.events}</td><td class="num">${x.tokens.toLocaleString()}</td></tr>`
+      )
+      .join("")}</table>`
+        : `<p class="mut">No compaction recorded in this project's transcripts yet —
+    the count starts the first time a session compacts, and nothing is
+    estimated to fill the blank.</p>`
+  }
+  <p class="mut">The board saves tokens a second way — a fresh agent reads a
+    fact off the board instead of re-deriving it — but what re-derivation
+    WOULD have cost cannot be measured exactly, so the bus states that
+    saving in words and never invents its number. No dollar figures on
+    purpose: every cloud agent prices differently, so the one unit that is
+    exact is the unit reported.</p>
   <div style="padding-top:8px"><b>Sessions</b> — every session this bus can
     see, read from the transcripts on this machine. The bus never asks a
     cloud agent anything: there is nothing to ask and no account to ask
@@ -1084,6 +1123,19 @@ ${costHtml}
     the list fills in from the local transcripts as sessions happen, and
     nothing is estimated to fill the blank.</p>`
   }
+</div>
+
+<h2>Work your model ran</h2>
+<div class="card">
+  <div style="font-size:20px">all time: <b>${(modelWork.total.prompt + modelWork.total.output).toLocaleString()} tokens</b>
+    <span class="mut">over ${modelWork.total.n} task${modelWork.total.n === 1 ? "" : "s"}</span></div>
+  <div style="padding-top:4px">since the hub started: <b>${(modelWork.session.prompt + modelWork.session.output).toLocaleString()} tokens</b>
+    <span class="mut">over ${modelWork.session.n} task${modelWork.session.n === 1 ? "" : "s"}</span></div>
+  <p class="mut">A plain fact, not savings: exactly what your local model processed
+    for bus tasks, as the model server reported it. The savings story is the
+    panel above — what cloud sessions did not have to re-read. The context
+    budget is the third side — what cloud sessions actually burned — and the
+    three are never summed.</p>
 </div>`
     : `<div class="card">
   <b>Shared with every space — not copied here</b>

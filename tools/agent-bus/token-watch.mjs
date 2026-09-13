@@ -294,6 +294,62 @@ export function baselineFrom(scans, opts = {}) {
 }
 
 /**
+ * What compacting actually saved, in exact tokens (problem/saved-counter-wrong-frame,
+ * the user's decisive reframing: "the point of token saved was by compacting
+ * sessions and bus to help cloud agents not have to reread everything").
+ *
+ * The arithmetic is exact because the curve is exact: a compaction drops the
+ * context a session re-reads on every turn, and the drop — multiplied by every
+ * turn the session ran after it — is the re-read it never paid. No counterfactual,
+ * no rates, no estimate: drop × remaining turns, summed over every compaction.
+ *
+ * Compaction points come from the labelled transcript markers, or — for tools
+ * that do not label them — the same double-gated curve-drop inference
+ * measuredBaseline uses (both gates: a ratio test alone silently misses real
+ * compactions and then starts catching ordinary turns). A transcript has either
+ * markers or drops, never both; the same never-both rule as the baseline.
+ *
+ * Returns { total, events, per }, per[i] aligned to scans[i].
+ */
+export function compactionSavings(scans) {
+  const compactionPoints = (scan) => {
+    const curve = scan?.curve || [];
+    const marks = Array.isArray(scan?.compactions) ? scan.compactions : [];
+    if (marks.length) return marks;
+    const inferred = [];
+    for (let i = 1; i < curve.length; i++) {
+      if (curve[i] > 1000 && curve[i] < curve[i - 1] * 0.75 && curve[i - 1] - curve[i] > 30000)
+        inferred.push(i);
+    }
+    return inferred;
+  };
+  let total = 0;
+  let events = 0;
+  const per = [];
+  for (const scan of scans || []) {
+    const curve = scan?.curve || [];
+    let sessionSaved = 0;
+    let sessionEvents = 0;
+    for (const at of compactionPoints(scan)) {
+      // at is the first post-compaction turn; curve[at-1] is what the session
+      // was about to keep re-reading. A compaction at the tail (no next turn
+      // yet) has no drop to count and none to claim.
+      if (at > 0 && at < curve.length) {
+        const drop = curve[at - 1] - curve[at];
+        if (drop > 0) {
+          sessionSaved += drop * (curve.length - at);
+          sessionEvents++;
+        }
+      }
+    }
+    per.push({ tokens: sessionSaved, events: sessionEvents });
+    total += sessionSaved;
+    events += sessionEvents;
+  }
+  return { total, events, per };
+}
+
+/**
  * How many more turns this session has to run before compacting now would have
  * paid for itself. See the header for the derivation — it is H1, nothing else.
  *

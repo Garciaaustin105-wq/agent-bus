@@ -19,6 +19,7 @@ import {
   approxTok,
   assess,
   baselineFrom,
+  compactionSavings,
   breakEvenTurns,
   contextTokens,
   dueForNudge,
@@ -503,6 +504,43 @@ check("why-not-naming-the-inferred-events", () => {
 check("approx-tokens-is-four-chars", () => {
   eq(approxTok(4000), 1000, "four characters to the token");
   eq(approxTok(0), 0, "nothing is nothing");
+});
+
+/* ------------------------------ compaction savings ------------------------- */
+
+const MARK = '{"type":"system","compactMetadata":{}}';
+
+check("compactionSavings-labels-drop-x-remaining-exactly", () => {
+  // curve = [100500, 106200, 8100, 8350], compactions = [2]
+  // drop = 106200 - 8100 = 98100; remaining turns = 2; saved = 196200
+  const t = [turn(U(90000, 10000, 500)), turn(U(105000, 1000, 200)), MARK, turn(U(5000, 3000, 100)), turn(U(8200, 100, 50))].join("\n");
+  const r = compactionSavings([scanTranscript(t)]);
+  eq(r.total, 196200, "labelled compaction total");
+  eq(r.events, 1, "one event");
+  eq(r.per[0].tokens, 196200, "per-session aligned");
+});
+
+check("compactionSavings-infers-unlabelled-with-the-baseline-gates", () => {
+  // Same numbers, no marker line: the curve drop (106200 -> 8100, ratio 0.076
+  // < 0.75, absolute 98100 > 30000) is inferred.
+  const t = [turn(U(90000, 10000, 500)), turn(U(106200, 0, 0)), turn(U(8100, 0, 0)), turn(U(8350, 0, 0))].join("\n");
+  const r = compactionSavings([scanTranscript(t)]);
+  eq(r.total, (106200 - 8100) * 2, "inferred compaction total");
+  eq(r.events, 1, "one inferred event");
+});
+
+check("compactionSavings-tail-marker-claims-nothing", () => {
+  // Marker after the last turn: no post-compaction turn, no drop to count.
+  const t = [turn(U(90000, 10000, 500)), turn(U(105000, 1000, 200)), MARK].join("\n");
+  const r = compactionSavings([scanTranscript(t)]);
+  eq(r.total, 0, "a tail compaction has no drop to claim");
+  eq(r.events, 0, "and no event");
+});
+
+check("compactionSavings-empty-and-garbage-never-throw", () => {
+  eq(compactionSavings([]).total, 0, "empty scans");
+  eq(compactionSavings([null, scanTranscript(""), undefined]).total, 0, "garbage scans");
+  eq(compactionSavings([null, undefined]).per.length, 2, "per stays aligned to the input length");
 });
 
 /* ---------------------------------- report --------------------------------- */

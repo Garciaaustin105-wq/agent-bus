@@ -472,12 +472,12 @@ await check("a done task carries a review form; a review lands; the self-review 
   assert.equal(st3.tasks.find((x) => x.id === t.id).reviews.length, 1, "and nothing was recorded");
 });
 
-await check("the savings counter shows TOKENS ONLY — no dollar figures, nothing to miscalculate", async () => {
+await check("the savings headline is COMPACTION — local model work is a separate plain fact", async () => {
   const stPath = path.join(stateDir, "state.json");
   const seed = JSON.parse(fs.readFileSync(stPath, "utf8"));
   seed.taskSeq = (seed.taskSeq ?? 0) + 1;
   seed.tasks.push({
-    id: `t${seed.taskSeq}`, lane: "local", title: "savings proof",
+    id: `t${seed.taskSeq}`, lane: "local", title: "model-work proof",
     prompt: "x", status: "done", at: new Date().toISOString(), doneAt: new Date().toISOString(),
     usage: { prompt: 1200, output: 800 },
   });
@@ -485,13 +485,23 @@ await check("the savings counter shows TOKENS ONLY — no dollar figures, nothin
   const expected = seed.tasks.reduce(
     (a, t) => a + (t.usage ? (t.usage.prompt || 0) + (t.usage.output || 0) : 0), 0);
   const html = await (await GET(`${base}/`)).text();
-  // Bound to the panel itself — the rest of the page (board notes) can carry
-  // dollar signs of its own, and they are none of this check's business.
-  const panel = (html.split("<h2>Tokens saved")[1] ?? "").split("<h2")[0];
-  assert.ok(panel.length > 0, "the panel renders");
-  assert.ok(panel.includes(expected.toLocaleString()), `the total counts recorded usage (${expected})`);
-  assert.ok(panel.includes("This session:"), "the session line renders");
-  assert.ok(!panel.includes("$"), "NO dollar signs — every agent prices differently, tokens are the exact unit");
+  const savedPanel = (html.split("<h2>Tokens saved")[1] ?? "").split("<h2")[0];
+  const workPanel = (html.split("<h2>Work your model ran")[1] ?? "").split("<h2")[0];
+  assert.ok(savedPanel.length > 0 && workPanel.length > 0, "both panels render");
+  assert.ok(savedPanel.includes("saved by compacting:"), "the savings headline is compaction, not local work");
+  assert.ok(
+    !savedPanel.includes(expected.toLocaleString()),
+    `the local task usage (${expected}) is NOT counted as savings`
+  );
+  assert.ok(
+    workPanel.includes(expected.toLocaleString()) && workPanel.includes("since the hub started:"),
+    "the model-work panel carries it as a plain fact"
+  );
+  assert.ok(
+    !/\bsaved\b/.test(workPanel),
+    "and it never calls itself savings"
+  );
+  assert.ok(!savedPanel.includes("$"), "NO dollar signs — tokens are the exact unit");
 });
 
 await check("a fresh install with no records shows honest empty states — nothing estimated to fill the blank", async () => {
@@ -501,6 +511,10 @@ await check("a fresh install with no records shows honest empty states — nothi
   assert.ok(
     panel.includes("No Claude Code sessions measured for this project yet"),
     "no transcripts -> the fill-in note, not fabricated rows"
+  );
+  assert.ok(
+    panel.includes("No Claude Code transcripts for this project yet"),
+    "the compaction counter says the same, honestly"
   );
   assert.ok(panel.includes("nothing is estimated to fill the blank"), "and the blank is named honestly");
 });
@@ -533,10 +547,10 @@ await check("the sessions list shows every Claude session with what it burned �
     assert.ok(panel.includes("sessburn"), "the session id is listed");
     assert.ok(panel.includes("2,350"), "its burned total is the exact read+write+input+output sum");
     assert.ok(panel.includes("burned (billed to you)"), "the column names burned for what it is");
-    const savedLine = panel.split("saved so far:")[1].split("tokens")[0];
+    const savedLine = panel.split("saved by compacting:")[1].split("tokens")[0];
     assert.ok(
       !savedLine.includes("2,350"),
-      "burned is NEVER summed into saved — saved still counts local tasks only"
+      "burned is NEVER summed into saved — a session with no compaction adds nothing"
     );
     // The chars-÷-4 attribution panels must say so out loud (user request
     // request/label-approx-panels): approximate is labelled, exact stays exact.
@@ -550,6 +564,51 @@ await check("the sessions list shows every Claude session with what it burned �
     );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true }); // nothing of ours left behind
+  }
+});
+
+await check("the savings counter measures a REAL compaction — drop times every remaining turn, exactly", async () => {
+  // A transcript with one labelled compaction: two fat turns, the marker, two
+  // slim turns after. curve = read+write+input per turn, so
+  //   curve = [100500, 106200, 8100, 8350], compactions = [2]
+  //   drop = 106200 - 8100 = 98100, remaining turns after it = 2
+  //   saved = 98100 x 2 = 196200
+  const dir = path.join(
+    os.homedir(),
+    ".claude",
+    "projects",
+    HOME.replace(/[^a-zA-Z0-9]/g, "-")
+  );
+  fs.mkdirSync(dir, { recursive: true });
+  const turn = (r, w, i) =>
+    `{"type":"assistant","message":{"usage":{"cache_read_input_tokens":${r},"cache_creation_input_tokens":${w},"input_tokens":${i},"output_tokens":10}}}`;
+  const lines = [
+    turn(90000, 10000, 500),
+    turn(105000, 1000, 200),
+    '{"type":"system","compactMetadata":{}}',
+    turn(5000, 3000, 100),
+    turn(8200, 100, 50),
+  ].join("\n");
+  fs.writeFileSync(path.join(dir, "compburn.jsonl"), lines + "\n");
+  try {
+    let html = "";
+    for (let i = 0; i < 20; i++) {
+      html = await (await GET(`${base}/`)).text();
+      if (html.includes("196,200")) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    const panel = (html.split("<h2>Tokens saved")[1] ?? "").split("<h2")[0];
+    assert.ok(
+      panel.includes("196,200"),
+      "the exact drop x remaining turns is the headline number"
+    );
+    assert.ok(panel.includes("compburn"), "the session is named in the per-session table");
+    assert.ok(
+      !panel.includes("$"),
+      "still no dollar figures — the exact unit is the only unit"
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
