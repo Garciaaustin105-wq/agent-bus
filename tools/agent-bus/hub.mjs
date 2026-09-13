@@ -694,15 +694,33 @@ function renderStatusHtml(state, opts = {}) {
         .join("")
     : "<p class=\"mut\">Nobody on the bus yet. An agent appears here after its first command.</p>";
 
-  const boardRows = board.length
-    ? board
-        .map(
-          ([k, v]) => `<details><summary><b>${esc(k)}</b>
+  // AREAS, not one wall (problem/board-one-flat-surface), and a FOLD, not
+  // unbounded growth (problem/board-grows-forever). The board is one state
+  // map, but the person reads it by job type: problems, requests, status
+  // chatter and everything else each get a labelled area with its own count,
+  // and each area renders its recent head plus one closed <details> holding
+  // the rest — folded, not deleted: the state file keeps every note and
+  // nothing anywhere removes one.
+  const BOARD_HEAD = 12;
+  const boardRow = ([k, v]) => `<details><summary><b>${esc(k)}</b>
       <span class="mut">${esc(v.by)} · ${esc(ago(v.at))}</span></summary>
-      <p>${esc(v.value)}</p></details>`
-        )
-        .join("")
-    : "<p class=\"mut\">The board is empty.</p>";
+      <p>${esc(v.value)}</p></details>`;
+  const boardArea = (title, rows, emptyNote) =>
+    rows.length
+      ? rows.slice(0, BOARD_HEAD).map(boardRow).join("") +
+        (rows.length > BOARD_HEAD
+          ? `<details><summary><b>${rows.length - BOARD_HEAD} older in ${esc(title)}</b>
+      <span class="mut">folded, not deleted — the board never removes a note</span></summary>
+      ${rows.slice(BOARD_HEAD).map(boardRow).join("")}</details>`
+          : "")
+      : `<p class="mut">${emptyNote}</p>`;
+  const boardGroups = [
+    ["Problems", board.filter(([k]) => k.startsWith("problem/")), "No problems on the board."],
+    ["Requests", board.filter(([k]) => k.startsWith("request/")), "Nothing requested yet."],
+    ["Status", board.filter(([k]) => k.startsWith("status/")), "No status notes."],
+  ];
+  const grouped = new Set(boardGroups.flatMap(([, rows]) => rows.map(([k]) => k)));
+  const boardOther = board.filter(([k]) => !grouped.has(k));
 
   const tasks = (state.tasks ?? []).slice(-12).reverse();
   const taskHtml = tasks.length
@@ -1155,7 +1173,10 @@ ${
 }
 
 <h2>Board (${board.length})</h2>
-${boardRows}
+${boardGroups
+  .map(([t, rows, empty]) => `<h3>${esc(t)} (${rows.length})</h3>${boardArea(t, rows, empty)}`)
+  .join("")}
+<h3>General (${boardOther.length})</h3>${boardArea("General", boardOther, "Nothing else on the board.")}
 
 <h2>Publish record (${publishes.length})</h2>
 <p class="mut">What actually went out the door, per space — version, what, who, when.

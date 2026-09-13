@@ -559,6 +559,32 @@ await check("a RUNNING task shows beside the tree lock even when the tree is fre
   );
 });
 
+await check("the board has AREAS by job type and folds its history — recent head, older folded, nothing deleted", async () => {
+  const stPath = path.join(stateDir, "state.json");
+  const seed = JSON.parse(fs.readFileSync(stPath, "utf8"));
+  const now = new Date().toISOString();
+  for (let i = 0; i < 15; i++)
+    seed.board[`problem/board-area-${String(i).padStart(2, "0")}`] = { value: "x", by: "t", at: now };
+  for (let i = 0; i < 3; i++) seed.board[`request/board-area-${i}`] = { value: "x", by: "t", at: now };
+  seed.board["status/board-area"] = { value: "x", by: "t", at: now };
+  seed.board["general-note"] = { value: "x", by: "t", at: now };
+  fs.writeFileSync(stPath, JSON.stringify(seed, null, 2));
+  const html = await (await GET(`${base}/`)).text();
+  assert.ok(html.includes("Problems (15)"), "each job type gets its own labelled area with a count");
+  assert.ok(html.includes("Requests (3)"), "requests get their own area");
+  assert.ok(
+    html.includes("Status (") && html.includes("status/board-area"),
+    "status keys get their own area"
+  );
+  assert.ok(
+    html.includes("General (") && html.includes("general-note"),
+    "and the unmatched keys get their own area"
+  );
+  assert.ok(html.includes("3 older in Problems"), "older notes fold behind one summary instead of growing the page");
+  assert.ok(html.includes("problem/board-area-14"), "the newest problem is in the head");
+  assert.ok(html.includes("problem/board-area-00"), "the oldest is still on the page — folded, not deleted");
+});
+
 await check("a DRAFT brief is dispatch-gated: approve queues it, changes leaves it unclaimed", async () => {
   const stPath = path.join(stateDir, "state.json");
   const seed = JSON.parse(fs.readFileSync(stPath, "utf8"));
