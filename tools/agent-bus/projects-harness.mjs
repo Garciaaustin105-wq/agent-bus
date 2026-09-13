@@ -165,6 +165,24 @@ check("project_add-validates-and-writes-the-registry", () => {
   assert.equal(reg[0].name, "proj-a");
 });
 
+check("project_add-warns-when-the-project-vendors-its-own-bus", () => {
+  // The invisible-session report (2026-09-13): a project with its own
+  // tools/agent-bus/server.mjs keeps launching that copy. Registration is
+  // where both paths are known, so it says so there.
+  const projV = path.join(HOME, "proj-vendored");
+  fs.mkdirSync(path.join(projV, "tools", "agent-bus"), { recursive: true });
+  fs.writeFileSync(path.join(projV, "tools", "agent-bus", "server.mjs"), "// an old copy\n");
+  const out = asActor("desk", () => callTool("project_add", { name: "proj-vendored", root: projV }));
+  assert.ok(out.includes("own copy of the bus"), `warned: ${out}`);
+  assert.ok(out.includes(`AGENT_BUS_PROJECT=${projV}`), "names the root to point sessions at");
+  const projC = path.join(HOME, "proj-clean");
+  fs.mkdirSync(projC, { recursive: true });
+  const clean = asActor("desk", () => callTool("project_add", { name: "proj-clean", root: projC }));
+  assert.ok(!clean.includes("Heads-up"), `no warning without a copy: ${clean}`);
+  asActor("desk", () => callTool("project_remove", { name: "proj-vendored" }));
+  asActor("desk", () => callTool("project_remove", { name: "proj-clean" }));
+});
+
 check("projects-lists-the-registry-with-this-bus-marked", () => {
   const out = asActor("desk", () => callTool("projects", {}));
   assert.ok(out.includes("proj-a"), `got: ${out}`);

@@ -1351,7 +1351,21 @@ function callTool(name, args) {
       withState(() => {
         writeRegistry(DIR, addProject(readRegistry(DIR), name, root));
       });
-      return `Registered app space "${name}" → ${root}. The hub window lists it under Spaces (?p=${name}); it has its own board, lock, agents and queue.`;
+      // A project that vendored the bus keeps launching its own copy from its
+      // own MCP config. That copy writes this space's state, so nothing looks
+      // broken — until its sessions never show alive on the hub (2026-09-13).
+      // Say it at registration, the one moment both paths are in hand.
+      const vendored = path.join(root, "tools", "agent-bus", "server.mjs");
+      const fold = (p) => (process.platform === "win32" ? p.toLowerCase() : p);
+      const ownCopy =
+        fs.existsSync(vendored) && fold(path.resolve(vendored)) !== fold(path.resolve(import.meta.filename));
+      return (
+        `Registered app space "${name}" → ${root}. The hub window lists it under Spaces (?p=${name}); it has its own board, lock, agents and queue.` +
+        (ownCopy
+          ? `\nHeads-up: ${root} has its own copy of the bus at ${vendored}. Sessions whose MCP config launches that copy can't show as alive here. ` +
+            `Point them at ${path.resolve(import.meta.filename)} with AGENT_BUS_PROJECT=${root}, then restart them.`
+          : "")
+      );
     }
 
     case "project_remove": {

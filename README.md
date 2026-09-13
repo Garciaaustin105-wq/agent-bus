@@ -147,6 +147,48 @@ one hub per project, and a second launch never starts a second server.
 
 MCP sessions get the same bus via `.mcp.json`.
 
+**Connecting sessions in another app.** A session working in an app space
+must launch *this hub's* `server.mjs`, pointed at the app's root — not a copy
+of the bus living inside the app. In the app's MCP config:
+
+```json
+{
+  "mcpServers": {
+    "agent-bus": {
+      "command": "node",
+      "args": ["<hub checkout>/tools/agent-bus/server.mjs"],
+      "env": { "AGENT_BUS_PROJECT": "<app root>" }
+    }
+  }
+}
+```
+
+With Claude Code, the same thing as a private override that leaves the app's
+committed `.mcp.json` alone (a local-scope server wins over a project one of
+the same name):
+
+```sh
+claude mcp add agent-bus --scope local -e AGENT_BUS_PROJECT=<app root> -- node <hub checkout>/tools/agent-bus/server.mjs
+```
+
+A config change reaches a session only when its MCP server restarts — a
+session that was already open keeps the server it started with.
+
+**An agent you expect is not on the hub.** In order:
+
+1. **Look in the Spaces bar.** Each space shows its agent count. A session
+   working in an app is on *that space's* page, not the hub's own; the hub's
+   empty board links the spaces that have agents.
+2. **The card says "older bus server".** The session's MCP config launches a
+   different copy of `server.mjs` — typically one vendored into the app before
+   it was a space. That copy writes the right board but records no process id,
+   so the card can never show **alive** and dims two minutes after each call.
+   Point the config at this hub's server as above. `project_add` warns about
+   this when the app root has its own `tools/agent-bus/server.mjs`.
+3. **Still wrong after a config change.** Check which `server.mjs` the session
+   is really running — the command line of its `node` process — before
+   changing anything else. An unrestarted session is the usual answer.
+
 **Spaces — one hub, several apps.** Register the apps the hub builds
 (`server.mjs project_add <name> <root>`) and the dashboard grows a Spaces bar:
 `?p=<name>` shows that app's own board, lock and queue, and the window's forms
@@ -193,8 +235,8 @@ node tools/agent-bus/blockers-harness.mjs     # 24 — blocker matching + the fi
 node tools/agent-bus/routing-harness.mjs      # 17 — runner routing from the fleet's own record
 node tools/agent-bus/runner-limits-harness.mjs # 16 — per-runner budgets
 node tools/agent-bus/worker-tasks-harness.mjs # 12 — task queue state layer + state-growth caps
-node tools/agent-bus/hub-http-harness.mjs     # 24 — dashboard HTTP edge, one-hub rule, savings counter, app spaces
-node tools/agent-bus/projects-harness.mjs     # 13 — the app-space registry + cross-space reads
+node tools/agent-bus/hub-http-harness.mjs     # 29 — dashboard HTTP edge, one-hub rule, savings counter, app spaces, old-server cards
+node tools/agent-bus/projects-harness.mjs     # 14 — the app-space registry + cross-space reads + vendored-copy warning
 node tools/agent-bus/steward-harness.mjs      # 40 — the steward's four duties, against a fake classifier
 node tools/agent-bus/bench-harness.mjs        # 23 — the bench contract: never deletes, hardware-gated
 node tools/agent-bus/lock-harness.mjs         # 5  — state lock staleness and identity

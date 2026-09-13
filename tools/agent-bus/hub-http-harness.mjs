@@ -321,6 +321,37 @@ await check("a registered ?p= renders that project's bus, not the hub's", async 
   assert.ok(html.includes("server.mjs work local"), "the page says how to drain this queue instead");
 });
 
+await check("a session on an OLD copy of the bus is named on its card, and an empty hub points at the space it is in", async () => {
+  // Dogfood report 2026-09-13 ("i dont see you"): the session was on the
+  // space's board all along, through a vendored server.mjs that records no
+  // pid/host — so its card could never say alive, and the hub's own page said
+  // "Nobody on the bus yet". a-worker above is exactly that record shape.
+  const own = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+  own.agents = {};
+  fs.writeFileSync(path.join(stateDir, "state.json"), JSON.stringify(own));
+
+  let html = await (await GET(`${base}/?p=proj-a`)).text();
+  assert.ok(html.includes("older bus server"), "the card says which server wrote it");
+  assert.ok(html.includes(`AGENT_BUS_PROJECT=${projA}`), "and names the project root to point it at");
+  assert.ok(html.includes(path.join(import.meta.dirname, "server.mjs")), "and THIS hub's server.mjs");
+  assert.ok(html.includes("(1 agent · "), "the Spaces bar counts the space's agents");
+
+  html = await (await GET(`${base}/`)).text();
+  assert.ok(html.includes("Nobody on this hub's own board"), "the hub's empty board does not claim nobody is connected");
+  assert.ok(/<a href="\/\?p=proj-a">proj-a<\/a> \(1\)/.test(html), "it links the space the agent is in");
+
+  // A registration from THIS server (pid + host) never carries the warning.
+  const a = JSON.parse(fs.readFileSync(projAState, "utf8"));
+  const saved = a.agents["a-worker"];
+  a.agents["a-worker"] = { ...saved, pid: child.pid, host: os.hostname() };
+  fs.writeFileSync(projAState, JSON.stringify(a));
+  html = await (await GET(`${base}/?p=proj-a`)).text();
+  assert.ok(!html.includes("older bus server"), "a current registration is not flagged");
+  assert.ok(html.includes('<span class="mut">alive</span>'), "and shows alive");
+  a.agents["a-worker"] = saved;
+  fs.writeFileSync(projAState, JSON.stringify(a));
+});
+
 await check("an unknown ?p= falls back to the hub, with a note", async () => {
   const res = await GET(`${base}/?p=ghost-app`);
   const html = await res.text();

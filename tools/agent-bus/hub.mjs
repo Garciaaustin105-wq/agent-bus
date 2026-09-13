@@ -129,6 +129,47 @@ const healthStr = (h) =>
         .filter(Boolean)
         .join(" · ");
 
+/* ── sessions running an old copy of the bus ──────────────────────────────── */
+
+// Dogfood report 2026-09-13 ("i dont see you"): a project that once vendored
+// the bus kept launching ITS copy from its own .mcp.json. That copy writes the
+// right state file, so the session is on the space's board — but it predates
+// pid/host, so the card can never say "alive" and greys out two minutes after
+// every call. From the window that reads as "the agent is not connected", and
+// nothing on the page said why. Both register paths in server.mjs (MCP
+// register and registerCli) stamp pid AND host, so a record carrying neither
+// was written by some other server. The card says so, with the fix.
+const SERVER_PATH = path.join(import.meta.dirname, "server.mjs");
+
+function isLegacyRegistration(a) {
+  return (
+    typeof a === "object" && a !== null &&
+    !Object.hasOwn(a, "pid") && !Object.hasOwn(a, "host")
+  );
+}
+
+function legacyServerHtml(repo) {
+  const esc = (v) =>
+    String(v ?? "").replace(/[&<>"']/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]
+    );
+  return `<p class="mut"><span class="warn">older bus server</span> — this session's MCP
+        config launches a different copy of server.mjs, which cannot report that the
+        session is alive. Point it at <code>${esc(SERVER_PATH)}</code> with
+        <code>AGENT_BUS_PROJECT=${esc(repo)}</code>, then restart the session.</p>`;
+}
+
+// Agents per registered space. The hub's own board can be empty while every
+// session works inside a space, and "Nobody on the bus yet" with no pointer
+// reads as "nobody is connected" — so the bar counts them and the empty state
+// names where they are.
+function spaceAgentCounts() {
+  return readRegistry(DIR).map((e) => ({
+    name: e.name,
+    agents: Object.keys((readStateForRoot(e.root) ?? {}).agents ?? {}).length,
+  }));
+}
+
 function spacesHtml(proj) {
   const esc = (v) =>
     String(v ?? "").replace(/[&<>"']/g, (c) =>
@@ -137,7 +178,9 @@ function spacesHtml(proj) {
   const links = readRegistry(DIR)
     .map((e) => {
       const here = !proj.own && proj.name === e.name;
-      const strip = healthStr(healthOf(readStateForRoot(e.root) ?? {}));
+      const st = readStateForRoot(e.root) ?? {};
+      const n = Object.keys(st.agents ?? {}).length;
+      const strip = `${n} agent${n === 1 ? "" : "s"} · ${healthStr(healthOf(st))}`;
       return `<a href="/?p=${encodeURIComponent(e.name)}"${here ? ' style="font-weight:700"' : ""}>${esc(e.name)}</a> <span class="mut">(${esc(strip)})</span>`;
     })
     .join(" · ");
@@ -421,6 +464,7 @@ const PAGE_CSS = `<style>
   .lock { background:var(--card); border:1px solid var(--line);
     border-left:3px solid var(--ok); border-radius:10px; padding:12px 14px; }
   .lock.held { border-left-color:var(--warn); }
+  .warn { color:var(--warn); font-weight:600; }
   details { background:var(--card); border:1px solid var(--line); border-radius:10px;
     padding:10px 14px; margin-bottom:6px; }
   summary { cursor:pointer; display:flex; gap:8px; align-items:center; }
@@ -688,12 +732,21 @@ function renderStatusHtml(state, opts = {}) {
       <div class="row"><span class="dot"></span><b>${esc(name)}</b>${badge}
         <span class="mut">${esc(ago(a.lastSeen ?? new Date(0).toISOString()))}</span></div>
       <p class="lane">${esc(a.lane || "no lane stated")}</p>
+      ${isLegacyRegistration(a) ? legacyServerHtml(repo) : ""}
       ${a.capable?.length ? `<p class="mut">can grant: ${esc(a.capable.join(", "))}</p>` : ""}
       <p class="path">${esc(a.cwd || "")}</p>
     </div>`;
         })
         .join("")
-    : "<p class=\"mut\">Nobody on the bus yet. An agent appears here after its first command.</p>";
+    : (() => {
+        const elsewhere = own ? spaceAgentCounts().filter((s) => s.agents > 0) : [];
+        return elsewhere.length
+          ? `<p class="mut">Nobody on this hub's own board. Sessions working in an app
+    space show on that space's page: ${elsewhere
+      .map((s) => `<a href="/?p=${encodeURIComponent(s.name)}">${esc(s.name)}</a> (${s.agents})`)
+      .join(" · ")}.</p>`
+          : "<p class=\"mut\">Nobody on the bus yet. An agent appears here after its first command.</p>";
+      })();
 
   // AREAS, not one wall (problem/board-one-flat-surface), and a FOLD, not
   // unbounded growth (problem/board-grows-forever). The board is one state
