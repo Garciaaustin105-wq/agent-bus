@@ -465,7 +465,7 @@ await check("a done task carries a review form; a review lands; the self-review 
   assert.equal(st3.tasks.find((x) => x.id === t.id).reviews.length, 1, "and nothing was recorded");
 });
 
-await check("the savings counter prices CLOUD-EQUIVALENT work from RECORDED usage", async () => {
+await check("the savings counter shows TOKENS ONLY — no dollar figures, nothing to miscalculate", async () => {
   const stPath = path.join(stateDir, "state.json");
   const seed = JSON.parse(fs.readFileSync(stPath, "utf8"));
   seed.taskSeq = (seed.taskSeq ?? 0) + 1;
@@ -475,14 +475,16 @@ await check("the savings counter prices CLOUD-EQUIVALENT work from RECORDED usag
     usage: { prompt: 1200, output: 800 },
   });
   fs.writeFileSync(stPath, JSON.stringify(seed, null, 2));
-  const prompt = seed.tasks.reduce((a, t) => a + (t.usage?.prompt || 0), 0);
-  const output = seed.tasks.reduce((a, t) => a + (t.usage?.output || 0), 0);
-  const dollars = ((prompt * 3 + output * 15) / 1e6).toFixed(2);
+  const expected = seed.tasks.reduce(
+    (a, t) => a + (t.usage ? (t.usage.prompt || 0) + (t.usage.output || 0) : 0), 0);
   const html = await (await GET(`${base}/`)).text();
-  assert.ok(html.includes("Cost savings"), "the panel renders");
-  assert.ok(html.includes(`≈ $${dollars}`), `the estimate prices recorded usage at the stated rates (expected ≈ $${dollars})`);
-  assert.ok(html.includes("This session:"), "the session line renders");
-  assert.ok(html.includes("AGGREGATE estimate at a stated rate"), "the dollars say they are an estimate, the tokens say they are measured");
+  // Bound to the panel itself — the rest of the page (board notes) can carry
+  // dollar signs of its own, and they are none of this check's business.
+  const panel = (html.split("<h2>Tokens saved")[1] ?? "").split("<h2")[0];
+  assert.ok(panel.length > 0, "the panel renders");
+  assert.ok(panel.includes(expected.toLocaleString()), `the total counts recorded usage (${expected})`);
+  assert.ok(panel.includes("This session:"), "the session line renders");
+  assert.ok(!panel.includes("$"), "NO dollar signs — every agent prices differently, tokens are the exact unit");
 });
 
 await check("a RUNNING task shows beside the tree lock even when the tree is free", async () => {
