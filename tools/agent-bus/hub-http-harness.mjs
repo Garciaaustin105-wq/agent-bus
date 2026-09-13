@@ -448,6 +448,46 @@ await check("a done task carries a review form; a review lands; the self-review 
   assert.equal(st3.tasks.find((x) => x.id === t.id).reviews.length, 1, "and nothing was recorded");
 });
 
+await check("a DRAFT brief is dispatch-gated: approve queues it, changes leaves it unclaimed", async () => {
+  const stPath = path.join(stateDir, "state.json");
+  const seed = JSON.parse(fs.readFileSync(stPath, "utf8"));
+  seed.taskSeq = (seed.taskSeq ?? 0) + 1;
+  seed.tasks.push({
+    id: `t${seed.taskSeq}`,
+    lane: "fixes",
+    title: "Brief draft: export 404",
+    prompt: "PROBLEM: the export 404s. MUST PRODUCE: a route that works. DO NOT: touch auth. CONTEXT: none named.",
+    status: "draft",
+    briefDraftFor: "note:defect/export-404",
+    by: "steward",
+    at: new Date().toISOString(),
+  });
+  fs.writeFileSync(stPath, JSON.stringify(seed, null, 2));
+  const draft = `t${seed.taskSeq}`;
+  const page = await (await GET(`${base}/task/${draft}`)).text();
+  assert.ok(page.includes("DRAFT brief"), "the draft says what it is");
+  assert.ok(page.includes("Approve &amp; dispatch") || page.includes("Approve & dispatch"), "the form says what approval does");
+  const ch = await fetch(`${base}/task/${draft}`, {
+    method: "POST", redirect: "manual",
+    headers: { "content-type": "application/x-www-form-urlencoded", origin: base },
+    body: `action=review&task_id=${draft}&verdict=changes&notes=tighten+the+acceptance&back=${encodeURIComponent(`/task/${draft}`)}`,
+  });
+  assert.equal(ch.status, 303);
+  const st1 = JSON.parse(fs.readFileSync(stPath, "utf8"));
+  assert.equal(st1.tasks.find((x) => x.id === draft).status, "draft",
+    "changes leaves the draft a draft — a worker still cannot claim it");
+  const ap = await fetch(`${base}/task/${draft}`, {
+    method: "POST", redirect: "manual",
+    headers: { "content-type": "application/x-www-form-urlencoded", origin: base },
+    body: `action=review&task_id=${draft}&verdict=approve&back=${encodeURIComponent(`/task/${draft}`)}`,
+  });
+  assert.equal(ap.status, 303);
+  const st2 = JSON.parse(fs.readFileSync(stPath, "utf8"));
+  const dispatched = st2.tasks.find((x) => x.id === draft);
+  assert.equal(dispatched.status, "queued", "approve on a draft DISPATCHES it");
+  assert.equal(dispatched.briefDraftFor, "note:defect/export-404", "the lineage stays on the task");
+});
+
 await check("live pages refresh themselves — the app window has no reload key", async () => {
   const st = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
   const task = st.tasks[0];
