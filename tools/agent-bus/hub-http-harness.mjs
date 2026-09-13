@@ -359,7 +359,7 @@ await check("an app space shows ITS OWN token panels — its transcripts, its mo
   }
 });
 
-await check("a session on an OLD copy of the bus is named on its card, and an empty hub points at the space it is in", async () => {
+await check("a session on an OLD copy of the bus is named on its card, and the hub's own page shows every space's agents", async () => {
   // Dogfood report 2026-09-13 ("i dont see you"): the session was on the
   // space's board all along, through a vendored server.mjs that records no
   // pid/host — so its card could never say alive, and the hub's own page said
@@ -374,9 +374,27 @@ await check("a session on an OLD copy of the bus is named on its card, and an em
   assert.ok(html.includes(path.join(import.meta.dirname, "server.mjs")), "and THIS hub's server.mjs");
   assert.ok(html.includes("(1 agent · "), "the Spaces bar counts the space's agents");
 
+  // Dogfood report 2026-09-13 ("i see local ai on the bus but i dont see
+  // you"): a pointer to the space was not enough — the hub's own page is the
+  // one left open, so it lists every space's agents, each naming its space.
+  const connectedOf = (h) => (h.split("<h2>Connected")[1] ?? "").split("<h2")[0];
   html = await (await GET(`${base}/`)).text();
-  assert.ok(html.includes("Nobody on this hub's own board"), "the hub's empty board does not claim nobody is connected");
-  assert.ok(/<a href="\/\?p=proj-a">proj-a<\/a> \(1\)/.test(html), "it links the space the agent is in");
+  let connected = connectedOf(html);
+  assert.ok(connected.startsWith(" (1)"), `the hub counts agents in every space: ${connected.slice(0, 20)}`);
+  assert.ok(connected.includes("<b>a-worker</b>"), "the space's agent has a card on the hub's own page");
+  assert.ok(connected.includes('in <a href="/?p=proj-a">proj-a</a>'), "and the card names the space it is in");
+
+  // A stale entry on the hub's own board must not hide the spaces' agents.
+  own.agents = { "old-cli": { lane: "cli", lastSeen: new Date(Date.now() - 10 * 60_000).toISOString() } }; // quiet, not yet pruned
+  fs.writeFileSync(path.join(stateDir, "state.json"), JSON.stringify(own));
+  connected = connectedOf(await (await GET(`${base}/`)).text());
+  assert.ok(connected.startsWith(" (2)") && connected.includes("<b>a-worker</b>") && connected.includes("<b>old-cli</b>"),
+    "a stale own-board entry and the space's agent both show");
+  assert.ok(connected.indexOf("<b>a-worker</b>") < connected.indexOf("<b>old-cli</b>"), "most recently seen first");
+  const oldCard = connected.slice(connected.indexOf("<b>old-cli</b>")).split('<div class="card')[0];
+  assert.ok(!oldCard.includes("in <a href="), "the hub's own agent carries no space label");
+  own.agents = {};
+  fs.writeFileSync(path.join(stateDir, "state.json"), JSON.stringify(own));
 
   // A registration from THIS server (pid + host) never carries the warning.
   const a = JSON.parse(fs.readFileSync(projAState, "utf8"));
@@ -386,6 +404,8 @@ await check("a session on an OLD copy of the bus is named on its card, and an em
   html = await (await GET(`${base}/?p=proj-a`)).text();
   assert.ok(!html.includes("older bus server"), "a current registration is not flagged");
   assert.ok(html.includes('<span class="mut">alive</span>'), "and shows alive");
+  connected = connectedOf(await (await GET(`${base}/`)).text());
+  assert.ok(/<b>a-worker<\/b>\s*<span class="mut">alive<\/span>/.test(connected), "alive on the hub's own page too");
   a.agents["a-worker"] = saved;
   fs.writeFileSync(projAState, JSON.stringify(a));
 });

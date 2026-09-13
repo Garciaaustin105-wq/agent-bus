@@ -159,17 +159,6 @@ function legacyServerHtml(repo) {
         <code>AGENT_BUS_PROJECT=${esc(repo)}</code>, then restart the session.</p>`;
 }
 
-// Agents per registered space. The hub's own board can be empty while every
-// session works inside a space, and "Nobody on the bus yet" with no pointer
-// reads as "nobody is connected" — so the bar counts them and the empty state
-// names where they are.
-function spaceAgentCounts() {
-  return readRegistry(DIR).map((e) => ({
-    name: e.name,
-    agents: Object.keys((readStateForRoot(e.root) ?? {}).agents ?? {}).length,
-  }));
-}
-
 function spacesHtml(proj) {
   const esc = (v) =>
     String(v ?? "").replace(/[&<>"']/g, (c) =>
@@ -704,9 +693,28 @@ function renderStatusHtml(state, opts = {}) {
   // own root, or the project space being viewed.
   const repo = own ? PROJECT_ROOT : opts.proj.root;
 
-  const agentCards = agents.length
-    ? agents
-        .map(([name, a]) => {
+  // The hub's own page lists every space's agents as well (dogfood report
+  // 2026-09-13: "i see local ai on the bus but i dont see you" — the session
+  // was alive in an app space, and the page people leave open is the hub's
+  // own). Each such card names its space. Messages and claims stay per bus, so
+  // the recipient list below still offers only this bus's agents.
+  const shown = [
+    ...agents.map(([name, a]) => ({ name, a, tasks: state.tasks ?? [], space: null, root: repo })),
+    ...(own
+      ? readRegistry(DIR)
+          .filter((e) => path.resolve(e.root) !== path.resolve(PROJECT_ROOT))
+          .flatMap((e) => {
+            const st = readStateForRoot(e.root) ?? {};
+            return Object.entries(st.agents ?? {}).map(([name, a]) => ({
+              name, a, tasks: st.tasks ?? [], space: e.name, root: e.root,
+            }));
+          })
+      : []),
+  ].sort((x, y) => Date.parse(y.a.lastSeen ?? 0) - Date.parse(x.a.lastSeen ?? 0));
+
+  const agentCards = shown.length
+    ? shown
+        .map(({ name, a, tasks, space, root }) => {
           // Three states, in honesty order — and the badge must mean what it
           // says (dogfood report 2026-09-13: the board showed 0 queued /
           // 0 running while every Connected card said "running", because a
@@ -719,7 +727,7 @@ function renderStatusHtml(state, opts = {}) {
           // no process to vouch for the agent (a CLI one-shot, or a machine
           // this one cannot check) — called "quiet", not "offline": the bus
           // cannot tell the difference and must not pretend.
-          const heldTask = (state.tasks ?? []).find(
+          const heldTask = tasks.find(
             (t) => t.status === "running" && t.runner === name
           );
           const running = agentRunning(a);
@@ -733,21 +741,14 @@ function renderStatusHtml(state, opts = {}) {
       <div class="row"><span class="dot"></span><b>${esc(name)}</b>${badge}
         <span class="mut">${esc(ago(a.lastSeen ?? new Date(0).toISOString()))}</span></div>
       <p class="lane">${esc(a.lane || "no lane stated")}</p>
-      ${isLegacyRegistration(a) ? legacyServerHtml(repo) : ""}
+      ${space ? `<p class="mut">in <a href="/?p=${encodeURIComponent(space)}">${esc(space)}</a></p>` : ""}
+      ${isLegacyRegistration(a) ? legacyServerHtml(root) : ""}
       ${a.capable?.length ? `<p class="mut">can grant: ${esc(a.capable.join(", "))}</p>` : ""}
       <p class="path">${esc(a.cwd || "")}</p>
     </div>`;
         })
         .join("")
-    : (() => {
-        const elsewhere = own ? spaceAgentCounts().filter((s) => s.agents > 0) : [];
-        return elsewhere.length
-          ? `<p class="mut">Nobody on this hub's own board. Sessions working in an app
-    space show on that space's page: ${elsewhere
-      .map((s) => `<a href="/?p=${encodeURIComponent(s.name)}">${esc(s.name)}</a> (${s.agents})`)
-      .join(" · ")}.</p>`
-          : "<p class=\"mut\">Nobody on the bus yet. An agent appears here after its first command.</p>";
-      })();
+    : "<p class=\"mut\">Nobody on the bus yet. An agent appears here after its first command.</p>";
 
   // AREAS, not one wall (problem/board-one-flat-surface), and a FOLD, not
   // unbounded growth (problem/board-grows-forever). The board is one state
@@ -1148,7 +1149,7 @@ ${opts.proj ? spacesHtml(opts.proj) : ""}
 ${flash ? `<div class="flash">${esc(flash)}</div>` : ""}
 <div class="mut" style="padding:0 0 8px 0">Pulse: ${esc(healthStr(healthOf(state)))}</div>
 
-<h2>Connected (${agents.length})</h2>
+<h2>Connected (${shown.length})</h2>
 <div class="grid">${agentCards}</div>
 
 ${
