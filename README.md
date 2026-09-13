@@ -53,6 +53,25 @@ node tools/agent-bus/server.mjs dashboard 7777   # the dashboard
 node tools/agent-bus/server.mjs board            # or plain CLI verbs
 ```
 
+**Best setup: give the bus a small local AI model to delegate work to.** The
+bus ships a steward — the built-in loop that triages every reported problem,
+reads finished work before you do, drafts a brief for every defect, and turns
+a mistake reported three times into a proposed rulebook patch. It needs a
+model to think with, and the best one is a **small local model**: you download
+it once, nothing leaves your machine, and the work it does is billed at $0.
+With [Ollama](https://ollama.com) that is two commands:
+
+```sh
+ollama pull qwen2.5:7b   # the steward's default — small enough for most machines
+ollama serve
+```
+
+`discover` finds whatever else you already have (LM Studio, llama.cpp, vLLM —
+anything serving the OpenAI-compatible API) and `bench` tells you which model
+is worth its disk space. No model at all is also a normal install: the board,
+the locks, the queue and the bench all work, and the steward waits, dormant,
+until you give it a model.
+
 State lands in the repo's own `.git/agent-bus/` (never committed) and the
 first `dashboard` run creates it. To verify the code before you trust it, run
 the test suites under [Verifying](#verifying) — they use temp dirs only.
@@ -123,6 +142,9 @@ node tools\agent-bus\server.mjs claim <name> <path> <reason>
 node tools\agent-bus\server.mjs note <key> <value>
 ```
 
+Launching again opens another window at the bus already running — there is
+one hub per project, and a second launch never starts a second server.
+
 MCP sessions get the same bus via `.mcp.json`.
 
 **Spaces — one hub, several apps.** Register the apps the hub builds
@@ -161,7 +183,7 @@ renders the same way. Both are unset here.
 ## Verifying
 
 ```sh
-node tools/agent-bus/e2e-agent-bus.mjs        # 65 — stdio end to end, temp dirs only
+node tools/agent-bus/e2e-agent-bus.mjs        # 70 — stdio end to end, temp dirs only
 node tools/agent-bus/agent-harness.mjs        # 33 — hub-agent dispatch rules
 node tools/agent-bus/edits-harness.mjs        # 32 — edit-protocol failure modes + the self-edit guard
 node tools/agent-bus/lessons-harness.mjs      # 23 — the cross-install learning seam
@@ -171,13 +193,14 @@ node tools/agent-bus/blockers-harness.mjs     # 24 — blocker matching + the fi
 node tools/agent-bus/routing-harness.mjs      # 17 — runner routing from the fleet's own record
 node tools/agent-bus/runner-limits-harness.mjs # 16 — per-runner budgets
 node tools/agent-bus/worker-tasks-harness.mjs # 12 — task queue state layer + state-growth caps
-node tools/agent-bus/hub-http-harness.mjs     # 20 — dashboard HTTP edge + app spaces + docs panels
+node tools/agent-bus/hub-http-harness.mjs     # 23 — dashboard HTTP edge, one-hub rule, savings counter, app spaces
 node tools/agent-bus/projects-harness.mjs     # 13 — the app-space registry + cross-space reads
+node tools/agent-bus/steward-harness.mjs      # 40 — the steward's four duties, against a fake classifier
 node tools/agent-bus/bench-harness.mjs        # 23 — the bench contract: never deletes, hardware-gated
 node tools/agent-bus/lock-harness.mjs         # 5  — state lock staleness and identity
 ```
 
-340 checks in total. All suites use temp dirs and never touch real state.
+388 checks in total. All suites use temp dirs and never touch real state.
 
 ## Learning across installs
 

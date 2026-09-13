@@ -17,17 +17,29 @@ rem shows this repo's own board. Nothing points at another checkout. (If you
 rem ever want to serve a different project root from here, AGENT_BUS_PROJECT
 rem is the seam — see the top-level README.)
 
-rem Pick a free port so a second launch does not fail on an in-use socket.
+rem ONE BUS. The state file is shared, so a second launch must never start a
+rem second server on a second port — that is a second steward waking every
+rem minute to ask the model the same questions double. If the hub is already
+rem listening, double-clicking again just points another window at it.
 set PORT=7777
-netstat -ano | find ":7777 " >nul 2>&1 && set PORT=7778
-netstat -ano | find ":7778 " >nul 2>&1 && if "%PORT%"=="7778" set PORT=7779
+netstat -ano | find ":7777 " | find "LISTENING" >nul 2>&1
+if %errorlevel%==0 goto :open
 
 start "" /min cmd /c "node tools\agent-bus\server.mjs dashboard %PORT%"
 
-rem Give the listener a moment before pointing a window at it. A failed first
-rem load shows an error page the user then has to refresh, which reads as broken.
-timeout /t 2 /nobreak >nul
+rem Wait until the port actually answers before pointing a window at it. A
+rem window opened too early lands on the browser's own error page — our
+rem auto-refresh watcher is not on that page, so it would never recover by
+rem itself, which reads as "the hub shows nothing".
+set /a tries=0
+:wait
+timeout /t 1 /nobreak >nul
+netstat -ano | find ":7777 " | find "LISTENING" >nul 2>&1
+if %errorlevel%==0 goto :open
+set /a tries+=1
+if %tries% lss 20 goto :wait
 
+:open
 set URL=http://127.0.0.1:%PORT%
 
 rem App mode, in whichever browser is actually installed. Edge ships with

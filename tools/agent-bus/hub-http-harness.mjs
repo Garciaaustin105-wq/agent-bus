@@ -107,6 +107,23 @@ const check = async (label, fn) => {
   }
 };
 
+// ONE HUB PER PROJECT: a second launch against a port that already serves a
+// hub must exit cleanly with the pointer to the running one — never a twin
+// server with a second steward loop asking the model double.
+const dup = spawn(
+  process.execPath,
+  [path.join(import.meta.dirname, "hub.mjs"), String(freePort)],
+  { env: { ...process.env, AGENT_BUS_PROJECT: HOME }, stdio: ["ignore", "pipe", "pipe"] }
+);
+const dupOut = [];
+dup.stdout.on("data", (c) => dupOut.push(String(c)));
+dup.stderr.on("data", (c) => dupOut.push(String(c)));
+await new Promise((r) => setTimeout(r, 3000));
+await check("a SECOND hub on the same port refuses to start — one bus, one steward", async () => {
+  assert.ok(dupOut.join("").includes("already running"), `no probe refusal: ${dupOut.join("").trim()}`);
+  assert.ok(!dupOut.join("").includes("dashboard: http://"), "the twin started a dashboard anyway");
+});
+
 await check("an evil Origin is refused — the drive-by form POST gets nothing", async () => {
   const res = await fetch(`${base}/`, {
     method: "POST",
@@ -446,6 +463,25 @@ await check("a done task carries a review form; a review lands; the self-review 
   assert.ok(selfFlash.includes("FAILED:") && selfFlash.includes("someone else"), "the worker cannot review its own task");
   const st3 = JSON.parse(fs.readFileSync(stPath, "utf8"));
   assert.equal(st3.tasks.find((x) => x.id === t.id).reviews.length, 1, "and nothing was recorded");
+});
+
+await check("the savings counter renders total and this-session from RECORDED usage", async () => {
+  const stPath = path.join(stateDir, "state.json");
+  const seed = JSON.parse(fs.readFileSync(stPath, "utf8"));
+  seed.taskSeq = (seed.taskSeq ?? 0) + 1;
+  seed.tasks.push({
+    id: `t${seed.taskSeq}`, lane: "local", title: "savings proof",
+    prompt: "x", status: "done", at: new Date().toISOString(), doneAt: new Date().toISOString(),
+    usage: { prompt: 1200, output: 800 },
+  });
+  fs.writeFileSync(stPath, JSON.stringify(seed, null, 2));
+  const expected = seed.tasks.reduce(
+    (a, t) => a + (t.usage ? (t.usage.prompt || 0) + (t.usage.output || 0) : 0), 0);
+  const html = await (await GET(`${base}/`)).text();
+  assert.ok(html.includes("Saved tokens"), "the panel renders");
+  assert.ok(html.includes(expected.toLocaleString()), `the total counts recorded usage (${expected})`);
+  assert.ok(html.includes("This session:"), "the session line renders");
+  assert.ok(html.includes("measured, not estimated"), "the counter says where its numbers come from");
 });
 
 await check("a DRAFT brief is dispatch-gated: approve queues it, changes leaves it unclaimed", async () => {

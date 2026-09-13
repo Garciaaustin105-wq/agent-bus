@@ -482,6 +482,30 @@ setInterval(async () => {
 }, 4000);
 </script>`;
 
+// The savings counter. Every local task records exact usage {prompt, output}
+// from the model server, so the counter is a SUM OVER MEASURED FACTS: tokens
+// that ran on this machine's own model, billed $0, instead of a cloud
+// session. It stays in tokens on purpose — the bus never invents a per-task
+// counterfactual "what it would have cost in the cloud", because it cannot be
+// exact. The hub's context-cost view above is the cloud side (transcript
+// transcripts), and the two kinds are never summed.
+function savingsOf(state, sinceMs) {
+  const sum = (tasks) => {
+    let tokens = 0, n = 0;
+    for (const t of tasks) {
+      const u = t && t.usage;
+      if (!u) continue;
+      const v = Number(u.prompt ?? 0) + Number(u.output ?? 0);
+      if (!Number.isFinite(v) || v <= 0) continue;
+      tokens += v;
+      n++;
+    }
+    return { tokens, n };
+  };
+  const all = state.tasks ?? [];
+  return { total: sum(all), session: sum(all.filter((t) => Date.parse(t.doneAt || t.at || 0) >= sinceMs)) };
+}
+
 function renderStatusHtml(state, opts = {}) {
   const { flash = null, interactive = false } = opts;
   // §6 — which space this render belongs to. own (or unset) is the hub's own
@@ -492,6 +516,8 @@ function renderStatusHtml(state, opts = {}) {
   const projQ = opts.proj && !opts.proj.own ? `?p=${encodeURIComponent(opts.proj.name)}` : "";
   pruneAgents(state);
   const now = Date.now();
+  // "This session" in the savings counter = since this hub process started.
+  const savings = savingsOf(state, now - process.uptime() * 1000);
   const ago = (iso) => {
     const s = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
     if (s < 60) return `${s}s ago`;
@@ -979,7 +1005,19 @@ ${
 ${hardwareHtml()}
 
 <h2>The context budget</h2>
-${costHtml}`
+${costHtml}
+
+<h2>Saved tokens — work that ran locally, billed $0</h2>
+<div class="card">
+  <div style="font-size:21px"><b>${savings.total.tokens.toLocaleString()}</b>
+    <span class="mut">tokens over ${savings.total.n} local task${savings.total.n === 1 ? "" : "s"} — all time</span></div>
+  <div style="padding-top:6px">This session: <b>${savings.session.tokens.toLocaleString()}</b>
+    <span class="mut">tokens over ${savings.session.n} task${savings.session.n === 1 ? "" : "s"}, since the hub started</span></div>
+  <p class="mut">Counted from the exact usage each local task records from the
+    model server — measured, not estimated. The context budget above is the
+    cloud side; the two are never summed, and the bus does not invent a
+    per-task "would have cost" number.</p>
+</div>`
     : `<div class="card">
   <b>Shared with every space — not copied here</b>
   <p class="mut">The rulebook and the how-we-work model below are the hub's
@@ -1828,8 +1866,38 @@ function runDashboard(port) {
 
 /* ── entrypoint ───────────────────────────────────────────────────────────── */
 
+// ONE HUB PER PROJECT. The state file is shared, so a second launch on a
+// second port buys nothing but cost — a second steward loop waking every
+// minute and asking the model the same questions double. Probe the port
+// first: if a hub already answers there (it stamps every render with the
+// hub-render marker, which is the identity check), say so and exit cleanly,
+// leaving the running one as the bus. A port held by something that is NOT a
+// hub fails later with the normal EADDRINUSE message.
+function hubAlreadyRunning(port) {
+  return import("node:http").then(({ default: http }) =>
+    new Promise((resolve) => {
+      const req = http.get({ host: "127.0.0.1", port, path: "/" }, (res) => {
+        res.setEncoding("utf8");
+        let seen = "";
+        const done = (yes) => { res.destroy(); resolve(yes); };
+        res.on("data", (c) => { seen += c; if (seen.includes('name="hub-render"')) done(true); });
+        res.on("end", () => resolve(seen.includes('name="hub-render"')));
+      });
+      req.setTimeout(2000, () => req.destroy());
+      req.on("error", () => resolve(false));
+    })
+  );
+}
+
 // A module, not a running hub, when imported — though nothing imports this
 // file: server.mjs spawns it precisely so it cannot.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  void runDashboard(Number(process.argv[2]) || 7777);
+  const port = Number(process.argv[2]) || 7777;
+  void hubAlreadyRunning(port).then((busy) => {
+    if (busy) {
+      console.log(`agent-bus is already running at http://127.0.0.1:${port} — one bus, one steward; nothing new started.`);
+      return;
+    }
+    void runDashboard(port);
+  });
 }
