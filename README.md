@@ -135,8 +135,13 @@ inside `.git` and is never committed.
 **Who is on the board.** Presence is activity-based and honest about it. A
 long-lived agent's registration carries its process id, and the dashboard asks
 the OS whether that process still exists — an agent working locally between bus
-calls shows a **running** badge for free, no heartbeat required. A card with no
-verifiable process (a one-shot CLI command, or an agent on another machine)
+calls shows a **running** badge for free, no heartbeat required. First-contact
+CLI verbs (`note`, `inbox`, `block`, `claim`) join the registry — that is how
+the first-time rules and the hub agent's greeting find a new agent. Ledger-only
+verbs an already-working agent runs (`task`, `review`, `send`, `miss`,
+`publish`, `unblock`, `release`) do not re-announce — the board's ledger
+already carries their name, and a card for a process that already died is
+noise. A registered agent on another machine (its pid cannot be checked here)
 reads **quiet** after two minutes without a bus call, and an agent unseen for
 an hour is pruned so its name frees up — unless its process is still running.
 

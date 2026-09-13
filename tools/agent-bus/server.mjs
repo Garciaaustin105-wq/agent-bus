@@ -350,7 +350,7 @@ const assertName = (name) => {
 const MAX_NOTE_CHARS = 8_000;
 const MAX_MESSAGE_CHARS = 8_000;
 const MAX_TASK_TITLE_CHARS = 200;
-const MAX_TASK_PROMPT_CHARS = 16_000;
+const MAX_TASK_PROMPT_CHARS = 32_000;
 const MAX_TASK_RESULT_CHARS = 64_000;
 const cap = (s, n) => {
   const text = String(s ?? "");
@@ -1978,7 +1978,6 @@ function runCli(argv) {
           else promptWords.push(restArgs[i]);
         }
         myName = process.env.AGENT_BUS_NAME || "cli";
-        registerCli(myName);
         return say(callTool("task_add", { lane, title, prompt: promptWords.join(" "), stage }));
       }
       case "work": {
@@ -2014,21 +2013,18 @@ function runCli(argv) {
       case "miss": {
         const [claimed, truth, ...c] = rest;
         myName = process.env.AGENT_BUS_NAME || "cli";
-        registerCli(myName);
         return say(callTool("miss", { claimed, truth, caught: c.join(" ") }));
       }
       // The spine's Review stage from a shell — same verdict, same refusals.
       case "review": {
         const [taskId, verdict, ...n] = rest;
         myName = process.env.AGENT_BUS_NAME || "cli";
-        registerCli(myName);
         return say(callTool("review", { task_id: taskId, verdict, notes: n.join(" ") }));
       }
       // The spine's Publish stage from a shell.
       case "publish": {
         const [version, ...w] = rest;
         myName = process.env.AGENT_BUS_NAME || "cli";
-        registerCli(myName);
         return say(callTool("publish", { version, what: w.join(" ") }));
       }
       // §5's second half from a shell — the same three verbs an MCP session
@@ -2050,7 +2046,6 @@ function runCli(argv) {
         const [id, ...h] = rest;
         if (!id || !h.length) throw new Error('usage: server.mjs unblock <blocker-id> "<what worked>"');
         myName = process.env.AGENT_BUS_NAME || "cli";
-        registerCli(myName);
         return say(callTool("unblock", { id, how: h.join(" ") }));
       }
       // §6 from a shell — register the app spaces the hub serves. The hub
@@ -2070,7 +2065,6 @@ function runCli(argv) {
       case "send": {
         const [to, ...v] = rest;
         myName = process.env.AGENT_BUS_NAME || "cli";
-        registerCli(myName);
         return say(callTool("send", { to, message: v.join(" ") }));
       }
       case "inbox": {
@@ -2086,7 +2080,6 @@ function runCli(argv) {
       }
       case "release": {
         myName = rest[0];
-        registerCli(myName);
         return say(callTool("release_tree", {}));
       }
       // Opt-in sharing with other installs. NOTHING is sent: the note is
