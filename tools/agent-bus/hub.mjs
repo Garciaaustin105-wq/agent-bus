@@ -27,6 +27,7 @@ import {
   DIR,
   PROJECT_ROOT,
   docsDir,
+  agentRunning,
   askRunner,
   asActor,
   callTool,
@@ -404,6 +405,8 @@ const PAGE_CSS = `<style>
   .row { display:flex; align-items:center; gap:7px; }
   .dot { width:7px; height:7px; border-radius:50%; background:var(--ok); flex:0 0 auto; }
   .quiet .dot { background:var(--mut); }
+  .run { color:var(--ok); font-size:11px; font-weight:600; border:1px solid var(--ok);
+    border-radius:4px; padding:0 5px; margin-left:2px; flex:0 0 auto; }
   .row .mut { margin-left:auto; }
   .lane { margin:6px 0 0; }
   .path { margin:3px 0 0; color:var(--mut); font-size:11px;
@@ -621,11 +624,17 @@ function renderStatusHtml(state, opts = {}) {
   const agentCards = agents.length
     ? agents
         .map(([name, a]) => {
-          // Two minutes without a bus call reads as idle. Called "quiet", not
-          // "offline": the bus cannot tell the difference and must not pretend.
-          const quiet = now - Date.parse(a.lastSeen ?? 0) > 120_000;
+          // Three states, in honesty order. "running" is the strongest: the OS
+          // confirms this agent's process exists right now, so the card stays
+          // bright however long the agent has gone between bus calls. "quiet"
+          // means two minutes without a bus call and no process to vouch for
+          // the agent (a CLI one-shot, or a machine this one cannot check) —
+          // called "quiet", not "offline": the bus cannot tell the difference
+          // and must not pretend.
+          const running = agentRunning(a);
+          const quiet = !running && now - Date.parse(a.lastSeen ?? 0) > 120_000;
           return `<div class="card${quiet ? " quiet" : ""}">
-      <div class="row"><span class="dot"></span><b>${esc(name)}</b>
+      <div class="row"><span class="dot"></span><b>${esc(name)}</b>${running ? '<span class="run">running</span>' : ""}
         <span class="mut">${esc(ago(a.lastSeen ?? new Date(0).toISOString()))}</span></div>
       <p class="lane">${esc(a.lane || "no lane stated")}</p>
       ${a.capable?.length ? `<p class="mut">can grant: ${esc(a.capable.join(", "))}</p>` : ""}

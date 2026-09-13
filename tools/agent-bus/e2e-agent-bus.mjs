@@ -71,7 +71,7 @@ t("...and identifies the server", init.result?.serverInfo?.name === "agent-bus")
 await b.rpc("initialize", {});
 const list = await a.rpc("tools/list", {});
 t("tools/list returns the tool set — including the review and publish surfaces",
-  (list.result?.tools?.length ?? 0) === 21,
+  (list.result?.tools?.length ?? 0) === 22,
   `got ${list.result?.tools?.length}`);
 t("every tool declares an input schema",
   list.result.tools.every((x) => x.inputSchema && x.inputSchema.type === "object"));

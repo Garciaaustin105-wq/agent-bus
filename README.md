@@ -132,6 +132,21 @@ write there. Cross-app facts — the rulebook, the model record, the context
 budget — stay on the hub's own page, shared by design. The registry lives
 inside `.git` and is never committed.
 
+**Who is on the board.** Presence is activity-based and honest about it. A
+long-lived agent's registration carries its process id, and the dashboard asks
+the OS whether that process still exists — an agent working locally between bus
+calls shows a **running** badge for free, no heartbeat required. A card with no
+verifiable process (a one-shot CLI command, or an agent on another machine)
+reads **quiet** after two minutes without a bus call, and an agent unseen for
+an hour is pruned so its name frees up — unless its process is still running.
+
+The rule for agents: if you are doing long local work between bus calls, fire
+a cheap ping now and then so the board keeps showing you.
+
+```sh
+node tools/agent-bus/server.mjs ping   # one line: "I am here"
+```
+
 **Pointing at a different project.** A hub normally serves the repo it runs
 in. When you want this hub's bus to live in a *different* project root instead,
 `AGENT_BUS_PROJECT` names it — state is read from `<root>/.git/agent-bus` and
@@ -150,14 +165,14 @@ node tools/agent-bus/discover-harness.mjs     # 11 — fleet discovery + the ope
 node tools/agent-bus/blockers-harness.mjs     # 24 — blocker matching + the fix-banking loop
 node tools/agent-bus/routing-harness.mjs      # 17 — runner routing from the fleet's own record
 node tools/agent-bus/runner-limits-harness.mjs # 16 — per-runner budgets
-node tools/agent-bus/worker-tasks-harness.mjs # 10 — task queue state layer + state-growth caps
-node tools/agent-bus/hub-http-harness.mjs     # 19 — dashboard HTTP edge + app spaces + docs panels
+node tools/agent-bus/worker-tasks-harness.mjs # 12 — task queue state layer + state-growth caps
+node tools/agent-bus/hub-http-harness.mjs     # 20 — dashboard HTTP edge + app spaces + docs panels
 node tools/agent-bus/projects-harness.mjs     # 13 — the app-space registry + cross-space reads
 node tools/agent-bus/bench-harness.mjs        # 23 — the bench contract: never deletes, hardware-gated
 node tools/agent-bus/lock-harness.mjs         # 5  — state lock staleness and identity
 ```
 
-334 checks in total. All suites use temp dirs and never touch real state.
+337 checks in total. All suites use temp dirs and never touch real state.
 
 ## Learning across installs
 

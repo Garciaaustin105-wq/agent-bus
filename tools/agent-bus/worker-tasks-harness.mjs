@@ -132,6 +132,42 @@ check("an IDLE poll keeps the worker registered — an hour of empty queue is no
   assert.notEqual(seen, stale, "the empty-queue poll refreshed lastSeen");
 });
 
+check("a live process is not pruned however cold its lastSeen — the pid is proof, not a guess", () => {
+  // The 1-hour rule exists so a DEAD agent's name frees up. An agent whose
+  // process the OS can still see is not dead, and a long local stretch between
+  // bus calls must not vanish it from the board. The dead-pid twin frees its
+  // name the way the rule always intended.
+  const stale = new Date(Date.now() - 61 * 60 * 1000).toISOString();
+  const s = readState();
+  s.agents["long-runner"] = {
+    sessionKey: "k", lane: "cli", cwd: HOME, host: os.hostname(),
+    pid: process.pid, // THIS harness's process — verifiably alive
+    registeredAt: stale, lastSeen: stale,
+  };
+  s.agents["gone-runner"] = {
+    sessionKey: "k", lane: "cli", cwd: HOME, host: os.hostname(),
+    pid: 4000000000, // no such process
+    registeredAt: stale, lastSeen: stale,
+  };
+  fs.writeFileSync(path.join(HOME, ".agent-bus", "state.json"), JSON.stringify(s));
+  asActor("long-runner", () => callTool("status")); // status runs pruneAgents
+  const after = readState().agents;
+  assert.ok(after["long-runner"], "the live-process agent survives the prune");
+  assert.equal(after["gone-runner"], undefined, "the dead-process agent's name frees up");
+});
+
+check("ping breathes — the cheapest mutating call keeps a working agent on the board", () => {
+  registerCli("pinger");
+  const before = readState().agents["pinger"].lastSeen;
+  asActor("pinger", () => callTool("ping"));
+  const after = readState().agents["pinger"].lastSeen;
+  assert.notEqual(after, before, "ping refreshed lastSeen");
+  assert.ok(
+    readState().agents["pinger"].pid === process.pid,
+    "the registration carries the pid the running badge is built from",
+  );
+});
+
 check("a finished task's result is capped — the state file is rewritten on every bus call", () => {
   queue("big result");
   claimNextTask("build");

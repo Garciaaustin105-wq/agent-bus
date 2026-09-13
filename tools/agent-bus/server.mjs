@@ -357,12 +357,40 @@ const cap = (s, n) => {
   return text.length > n ? text.slice(0, n) + `\n[truncated at ${n} chars]` : text;
 };
 
+/** Can the OS still see this process? `kill(pid, 0)` sends no signal — it only
+ *  asks whether that pid exists, and works on Windows and POSIX alike; EPERM
+ *  means it exists but belongs to another user — still alive. This is the same
+ *  primitive holderAlive uses for locks, applied to agent registrations. */
+function pidAlive(pid) {
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return false;
+  if (pid === process.pid) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === "EPERM";
+  }
+}
+
+/** Is this registration's process verifiably running HERE? A registration from
+ *  another machine carries a pid this machine cannot vouch for, so a recorded
+ *  host that is not this one falls back to the time rule. A CLI one-shot
+ *  records the pid of an ephemeral process — the check then reads false and
+ *  the card falls back to lastSeen, which is the honest display for it. */
+function agentRunning(a) {
+  if (!a || !pidAlive(a.pid)) return false;
+  if (a.host && a.host !== os.hostname()) return false;
+  return true;
+}
+
 function pruneAgents(state) {
   // An agent that has not been seen for an hour is gone. Its name frees up so a
-  // restarted session can take it back.
+  // restarted session can take it back — unless its process is still running.
+  // A long-lived agent working locally between bus calls is exactly the one the
+  // board must not vanish, and agentRunning is proof, not a guess.
   const cutoff = Date.now() - 60 * 60 * 1000;
   for (const [name, a] of Object.entries(state.agents)) {
-    if (Date.parse(a.lastSeen ?? 0) < cutoff) delete state.agents[name];
+    if (Date.parse(a.lastSeen ?? 0) < cutoff && !agentRunning(a)) delete state.agents[name];
   }
 }
 
@@ -384,14 +412,7 @@ function touch(state) {
  */
 function holderAlive(lock) {
   if (!lock || typeof lock.holderPid !== "number") return true; // pre-1.1 lock, trust the TTL
-  if (lock.holderPid === process.pid) return true;
-  try {
-    process.kill(lock.holderPid, 0);
-    return true;
-  } catch (err) {
-    // EPERM means it exists but belongs to another user — still alive.
-    return err.code === "EPERM";
-  }
+  return pidAlive(lock.holderPid);
 }
 
 function lockIsLive(lock) {
@@ -507,6 +528,12 @@ const TOOLS = [
       },
       required: ["claimed", "truth"],
     },
+  },
+  {
+    name: "ping",
+    description:
+      "One-line liveness: the cheapest mutating call, so an agent doing long local work between bus calls keeps showing on the board. Registers if you have not, refreshes lastSeen if you have.",
+    inputSchema: { type: "object", properties: {} },
   },
   {
     name: "status",
@@ -681,6 +708,11 @@ function callTool(name, args) {
           sessionKey: SESSION_KEY,
           lane: args.lane ? String(args.lane) : null,
           cwd: process.cwd(),
+          // Same rule as registerCli: the pid backs a "running" badge with a
+          // live process, and host stops a foreign machine's pid being checked
+          // against this one.
+          pid: process.pid,
+          host: os.hostname(),
           registeredAt: nowIso(),
           lastSeen: nowIso(),
           // A re-registration (session restart, name re-claim after the hour)
@@ -1058,6 +1090,16 @@ function callTool(name, args) {
       });
     }
 
+    // The cheapest way to be seen. An agent doing long local work between bus
+    // calls fires this so the board keeps showing it. It mutates lastSeen,
+    // which is the point — read verbs stay silent by design. registerCli is
+    // the whole implementation: it re-announces (fresh pid) or first-announces
+    // through the same door every registration walks.
+    case "ping":
+      if (!myName) throw new Error("No actor name — call register first.");
+      registerCli(myName);
+      return "Seen. The board shows you as of now.";
+
     // Everything at a glance. `agents` answers who is here and `board` answers
     // what they left behind; needing both to know the state of the bus is what
     // made it confusing to look at.
@@ -1080,12 +1122,14 @@ function callTool(name, args) {
           for (const [n, a] of agents) {
             const mine = a.sessionKey === SESSION_KEY ? "  <- you" : "";
             // lastSeen is refreshed by touch() on every bus call, and
-            // pruneAgents drops anyone an hour cold — so this is the honest
-            // answer to "is that one still there?" rather than a guess.
+            // pruneAgents drops anyone an hour cold (unless their process is
+            // still running) — so this is the honest answer to "is that one
+            // still there?" rather than a guess. "running" is stronger than
+            // any timestamp: the OS says the process exists right now.
             const seen = a.lastSeen ? ago(a.lastSeen) : "unknown";
             lines.push(`  ${n}${mine}`);
             lines.push(`     ${a.lane || "no lane stated"}`);
-            lines.push(`     last seen ${seen}`);
+            lines.push(`     last seen ${seen}${agentRunning(a) ? " · running" : ""}`);
           }
         }
         lines.push("", "WORKING TREE", "  " + describeLock(state.lock));
@@ -1908,6 +1952,12 @@ function runCli(argv) {
         return say(callTool("agents", {}));
       case "status":
         return say(callTool("status", {}));
+      // A one-line "I am here" for an agent doing long local work: the
+      // cheapest mutating call, so the board keeps showing you while you work.
+      case "ping":
+        myName = process.env.AGENT_BUS_NAME || "cli";
+        registerCli(myName);
+        return say(callTool("ping", {}));
       case "tasks":
         return say(callTool("tasks", {}));
       case "runners":
@@ -2162,6 +2212,12 @@ function registerCli(name) {
       sessionKey: prior?.sessionKey ?? SESSION_KEY,
       lane: prior?.lane ?? "cli",
       cwd: process.cwd(),
+      // The pid lets the dashboard show "running" for a long-lived process
+      // without any heartbeat; for a one-shot CLI command it dies with the
+      // command and the card falls back to lastSeen. host keeps a foreign
+      // machine's pid from being checked against this machine's process table.
+      pid: process.pid,
+      host: os.hostname(),
       registeredAt: prior?.registeredAt ?? nowIso(),
       lastSeen: nowIso(),
       // Same rule as the MCP register: a re-announced CLI actor keeps the
@@ -2179,6 +2235,7 @@ export {
   DIR,
   PROJECT_ROOT,
   docsDir,
+  agentRunning,
   asActor,
   askRunner,
   callTool,

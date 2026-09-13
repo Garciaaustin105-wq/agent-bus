@@ -154,6 +154,41 @@ await check("the normal page still renders", async () => {
   assert.ok(html.includes("This machine"), "the hardware panel renders even where nvidia-smi is absent");
 });
 
+await check("a live process shows running even hours cold; a dead one falls back to quiet", async () => {
+  // The 1-hour prune and the 2-minute quiet both answer "has it called the
+  // bus" — not "is it running". The pid closes that gap: the hub asks the OS
+  // whether the agent's process exists, so a long-lived agent working locally
+  // between bus calls stays bright, and the fallback stays honest. Each
+  // assertion gets its own render so the two cards cannot blur together.
+  const stale = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+  const s = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+  s.agents = {
+    "live-runner": {
+      lane: "build", cwd: HOME, pid: child.pid, host: os.hostname(),
+      registeredAt: stale, lastSeen: stale,
+    },
+  };
+  fs.writeFileSync(path.join(stateDir, "state.json"), JSON.stringify(s));
+  let html = await (await GET(base)).text();
+  assert.ok(html.includes('<span class="run">running</span>'), "the badge renders for a verifiable process");
+  assert.ok(!html.includes('class="card quiet"'), "a live process is not dimmed, whatever its lastSeen");
+
+  s.agents = {
+    "ghost-cli": {
+      lane: "cli", cwd: HOME, pid: 4000000000, host: os.hostname(),
+      registeredAt: stale, lastSeen: stale,
+    },
+  };
+  fs.writeFileSync(path.join(stateDir, "state.json"), JSON.stringify(s));
+  html = await (await GET(base)).text();
+  assert.ok(!html.includes('<span class="run">running</span>'), "a dead pid earns no badge");
+  // The render path prunes, so the hour-cold dead-pid agent is not even quiet
+  // — it is gone, its name freed. Quiet is for the two-minute window; past the
+  // hour with no verifiable process, the honest board has nobody on it.
+  assert.ok(!html.includes("ghost-cli"), "pruned at render, not displayed stale");
+  assert.ok(html.includes("Nobody on the bus yet"), "the empty board says so");
+});
+
 await check("a task has its own page with its own worktree and problems", async () => {
   const q = await fetch(`${base}/`, {
     method: "POST",
