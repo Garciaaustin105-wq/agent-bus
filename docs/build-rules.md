@@ -654,7 +654,7 @@ H13 says an auto-compaction pays for itself. This rule is about *when*.
 Re-reading is 98% of tokens (H1), so what a session costs is set by how big
 its context gets before it is cut.
 
-**Incident:** measured 2026-09-14 over all 18 lowvoltage-app transcripts
+**Incident:** measured 2026-09-14 over one project's 18 session transcripts
 (10,589 turns, deduped by message id). Two sessions ran on a 1M-token window and
 never compacted. They averaged 548k and 516k tokens of context per turn, and
 were **77% of everything the 18 sessions spent**. Capped by auto-compaction
@@ -768,15 +768,15 @@ generation that stops early can be stopped by any of:
     headers until generation ENDS, so a call that thinks longer than the
     timeout dies while the model was doing exactly what it was asked for.
 
-**Incidents, in the order they were misread.** (1) `gpt-oss` was flagged
-`thinking: false` because of the name; three build tasks came back as stranded
+**Incidents, in the order they were misread.** (1) A local reasoning model was
+flagged `thinking: false` because of its name; three build tasks came back as stranded
 reasoning and it read as the model being bad. 1,200 tokens is not enough to
 think *and* answer. (2) Raising `num_predict` fixed that HALF of the time: a
-further build task stranded at num_predict 14,000 and another at 32,000 for
-GLM, still mid-reasoning — the real limit was `num_ctx`, which nothing in this
+further build task stranded at num_predict 14,000 and another at 32,000 on a
+cloud model, still mid-reasoning — the real limit was `num_ctx`, which nothing in this
 repo ever set, so ollama's default applied to a prompt of ~2,700 tokens. The
 same symptom had three owners in a row, and one was blamed twice. (3) With the
-window finally open, a GLM call died on undici's 5-minute headers timeout —
+window finally open, a cloud model call died on undici's 5-minute headers timeout —
 fixed by streaming (`stream: true`), which also happens to be the shape in
 which the other two limits stop being invisible: `done_reason` and the token
 counts arrive on every chunk.
@@ -820,31 +820,44 @@ a 25-line function buys almost nothing and costs all of those turns.
 - Checks are still written before either path, and verification never
   delegates (J4).
 
-**Incident:** measured 2026-09-14 on a 1,237-turn camera-platform session,
-from its transcript deduped by message id. 153 runner calls generated about
+**Incident:** measured 2026-09-14 on one 1,237-turn build session, from its
+transcript deduped by message id. 153 runner calls generated about
 750k tokens, but only about 60k tokens of code landed. The 225 orchestrator
 turns spent on handoffs cost about 4.5x what writing that code directly would
 have: roughly 20% of the session's spend, for no saving. The one file handed
 off as a batch (seven functions, one launch, one review) was the one clear win.
 
-### J6. Pick the runner by the size of the job, and retry an empty answer once on the other.
+### J6. Ask for a role, not a model. The bus picks the runner, and retries a miss once elsewhere.
 
-Measured 2026-09-14 over 153 calls on the same session:
+Which model is fast or reliable depends on the machine, the models pulled and
+the week, so no rule names one. A rule names the job; the bus fills it from its
+own finished tasks (`routing.mjs` `pickForRole`):
 
-    runner          per call   tok/s   empty answers   answer size
-    gpt-oss:20b       29 s      122        11%          ~1.2k chars
-    glm-5.3-flash     86 s      117         6%          ~2.0k chars
+    role    the job                              the bus picks, over each runner's last 10 finishes
+    quick   an ordinary job, about one file      lowest median run time among runners missing <= 25%
+    deep    a long or tricky body (> 2k tokens)  fewest misses, then the longest answers
 
-Both spend 92–95% of what they generate thinking, so neither is the slow part:
-the orchestrator's turns around them are (J5).
+A miss is a failed task or a done one with no final answer. A runner needs 3
+finishes before its record chooses; until then `task_add` pins nothing, the
+lane's default runs, and the reply says so. The usual gates still apply:
+enabled, the prompt fits its ctx, not on a three-failure streak.
 
 **Practical form:**
-- gpt-oss for one file of ordinary code: three times faster.
-- GLM for long or tricky bodies, where a second attempt costs more than the
-  wait.
-- An empty `response` is a limit first (J2): read `done_reason` before blaming
-  the model. If it really is the model, retry once on the other runner rather
-  than the same one again.
+- `task_add` with `role: "quick"` or `"deep"`, or no role and the prompt's
+  size decides. The reply names the runner and why; pass `runner_id` to
+  override.
+- A miss is retried once, automatically, on the role's next runner, never the
+  one that missed. A retry that misses too is left for a person: two runners
+  missing the same prompt is about the prompt.
+- An empty answer is a limit first (J2): read `done_reason` before blaming the
+  model.
+
+**Why:** measured 2026-09-14 over 153 calls in one session, two runners differed
+threefold in time per call (29 s against 86 s) and nearly twofold in empty
+answers (11% against 6%), while both spent 92–95% of what they generated
+thinking. Neither was the slow part: the orchestrator's turns around them were
+(J5). A rule written as "use model X for Y" was true for one machine for one
+week; the measurement is what generalises.
 
 ---
 
@@ -887,8 +900,8 @@ cost: every separate turn re-reads the whole conversation (H1).
 
     node server.mjs claim <name> <path> "commit X" && git commit -m "…"; node server.mjs release <name>
 
-**Incident:** measured 2026-09-14 on a 1,237-turn camera-platform session:
-142 turns (11%) were bus calls alone, at 16.2M tokens of re-reading. Claim,
+**Incident:** measured 2026-09-14 on the same 1,237-turn session: 142 turns
+(11%) were bus calls alone, at 16.2M tokens of re-reading. Claim,
 commit and release done as three turns cost three times what one command
 costs, and they are no safer.
 

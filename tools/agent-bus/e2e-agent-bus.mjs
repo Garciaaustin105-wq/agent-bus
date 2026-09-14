@@ -88,7 +88,7 @@ const early = await a.call("claim_tree", { path: "/x", reason: "too soon" });
 t("acting before register is refused", early.isError && early.text.includes("register"));
 const joined = (await a.call("register", { name: "lane-d", lane: "components UI" })).text;
 t("register succeeds", joined.includes("lane-d"));
-t("every joining agent is told the cost rules (H16, J5, J6, K2)", ["COST RULES", "80-100k", "whole file", "retry once on the other runner", "one command"].every((w) => joined.includes(w)));
+t("every joining agent is told the cost rules (H16, J5, J6, K2)", ["COST RULES", "80-100k", "whole file", "retries a miss once", "one command"].every((w) => joined.includes(w)));
 await b.call("register", { name: "opus-desktop", lane: "desktop pass" });
 const roster = await a.call("agents");
 t("each agent sees the other", roster.text.includes("opus-desktop"));

@@ -49,7 +49,17 @@ import {
   matchFixes,
   pruneBlocks,
 } from "./blockers.mjs";
-import { extractHistory, recommendRunner, routingVerdicts, suggestLine } from "./routing.mjs";
+import {
+  extractHistory,
+  inferRole,
+  isEmptyAnswer,
+  pickForRole,
+  recommendRunner,
+  ROLES,
+  routedLine,
+  routingVerdicts,
+  suggestLine,
+} from "./routing.mjs";
 import {
   BENCH_PROMPTS,
   JUDGE_INSTRUCTION,
@@ -559,7 +569,8 @@ const TOOLS = [
         lane: { type: "string", description: "Which lane polls for this. Default 'local'." },
         title: { type: "string", description: "A few words, for the dashboard row." },
         prompt: { type: "string", description: "The WHOLE spec. Runners are prompt-in/text-out with no filesystem — paste anything they would otherwise have to read." },
-        runner_id: { type: "string", description: "An id from runners(). Omitted = the lane's default." },
+        runner_id: { type: "string", description: "An id from runners(). Omitted = the bus fills the task's role from its measurements, or the lane's default until it has any." },
+        role: { type: "string", description: "quick (an ordinary job, about one file's worth) or deep (a long or tricky one). Omitted = sized from the prompt. The bus picks the runner for the role from its own record; a miss is retried once on the role's next runner." },
         stage: { type: "string", description: "Optional — which workflow-spine stage this work belongs to: idea, spec, design, build, review, test, release, publish, monitor or maintain. Refused if it names none of them." },
       },
       required: ["lane", "title", "prompt"],
@@ -699,7 +710,7 @@ export const COST_RULES = [
   "COST RULES (docs/build-rules.md H16, J5, J6, K2) — every turn re-reads the whole conversation, so:",
   "- Compact at 80-100k tokens of context, right after a commit. Never let a session grow toward the 1M window.",
   "- Hand off a whole file's worth of work at once, never one small function. Code under ~30 lines you write yourself; checks first either way.",
-  "- gpt-oss for one ordinary file (~30 s); GLM for long or tricky bodies (~90 s). An empty answer: read done_reason, then retry once on the other runner.",
+  "- Queue a handoff with task_add and a role: quick for one ordinary file, deep for a long or tricky body. The bus fills each role from its own measured record and retries a miss once on the role's next runner; an empty answer is a limit first, so read done_reason.",
   "- Do the bus steps for a commit in one command: claim && commit; release.",
 ].join("\n");
 
@@ -1253,6 +1264,9 @@ function callTool(name, args) {
       });
 
     case "task_add":
+      if (args.role != null && !Object.hasOwn(ROLES, args.role)) {
+        throw new Error(`Unknown role "${args.role}". The roles: ${Object.keys(ROLES).join(", ")}.`);
+      }
       return withState((state) => {
         touch(state);
         state.tasks ||= [];
@@ -1264,6 +1278,7 @@ function callTool(name, args) {
           prompt: cap(args.prompt, MAX_TASK_PROMPT_CHARS),
           status: "queued",
           runner_id: args.runner_id || null,
+          role: args.role || null,
           // §0's fourth gap, closed: a stage is DATA, not a convention. An
           // unnamed one is fine — older queues and quick drafts carry none —
           // but a named one that matches no spine stage is refused, because a
@@ -1290,10 +1305,21 @@ function callTool(name, args) {
         // lane's default, and the suggestion is one line the queuer can pin
         // or ignore. Ignoring it is also data — the suggestion has not earned
         // trust yet.
+        //
+        // Roles are the exception: once a runner has a measured record, the bus
+        // fills the task's role itself (routing.mjs pickForRole) and says who
+        // and why. Rules then name roles, never anyone's models.
         let suggestion = "";
         if (!args.runner_id) {
-          const rec = recommendRunner({ prompt: args.prompt }, readRunners(), extractHistory(state.tasks));
-          suggestion = suggestLine(rec);
+          const role = inferRole(args);
+          const pick = pickForRole(role, { prompt: args.prompt }, readRunners(), extractHistory(state.tasks));
+          if (pick && !pick.cold) {
+            Object.assign(state.tasks.find((t) => t.id === id), { runner_id: pick.id, role });
+            suggestion = routedLine(pick);
+          } else {
+            const rec = recommendRunner({ prompt: args.prompt }, readRunners(), extractHistory(state.tasks));
+            suggestion = suggestLine(rec);
+          }
         }
         return `Queued ${id} on lane "${args.lane || "local"}": ${args.title}` + (suggestion ? `\n${suggestion}` : "");
       });
@@ -1827,6 +1853,41 @@ function finishTask(id, patch) {
 }
 
 /**
+ * A task that failed, or came back with no final answer, gets ONE more try on
+ * the next runner its role would pick, never the one that just missed. Returns
+ * {id, runner, why} for the queued retry, or null: not a miss, already a
+ * retry, already retried, or no other runner eligible. A retry that misses is
+ * left for a person — two runners missing the same prompt is about the prompt.
+ */
+function queueRetry(id) {
+  return withState((state) => {
+    state.tasks ||= [];
+    const t = state.tasks.find((x) => x.id === id);
+    if (!t || t.retryOf) return null;
+    if (!(t.status === "failed" || (t.status === "done" && isEmptyAnswer(t.result)))) return null;
+    if (state.tasks.some((x) => x.retryOf === id)) return null;
+    const role = inferRole(t);
+    const pick = pickForRole(role, t, readRunners(), extractHistory(state.tasks), [t.model, t.runner_id].filter(Boolean));
+    if (!pick) return null;
+    const nid = nextTaskId(state);
+    state.tasks.push({
+      id: nid,
+      lane: t.lane,
+      title: cap(`retry: ${t.title}`, MAX_TASK_TITLE_CHARS),
+      prompt: t.prompt,
+      status: "queued",
+      runner_id: pick.id,
+      role,
+      retryOf: id,
+      stage: t.stage ?? null,
+      by: "retry",
+      at: nowIso(),
+    });
+    return { id: nid, runner: pick.id, why: pick.why };
+  });
+}
+
+/**
  * Update a task in place WITHOUT changing its status or stamping doneAt — the
  * progress beat. A running task that only ever reads as "running" is
  * indistinguishable from a hang; the worker streams what it has so far and this
@@ -1897,6 +1958,8 @@ async function runWorker(lane, runnerId) {
       clearInterval(beat);
       finishTask(task.id, { status: "done", result: answer, model: chosen.id, progress: null, usage: sink.usage ?? null });
       process.stdout.write(`  done (${answer.length} chars)\n`);
+      const retry = isEmptyAnswer(answer) ? queueRetry(task.id) : null;
+      if (retry) process.stdout.write(`  no final answer — retry ${retry.id} queued on ${retry.runner}\n`);
     } catch (err) {
       clearInterval(beat);
       // A failure is a RESULT, not a crash. It goes on the queue so the person
@@ -1904,6 +1967,8 @@ async function runWorker(lane, runnerId) {
       // forever with no explanation.
       finishTask(task.id, { status: "failed", result: err.message, model: task.runner_id ?? runner.id, progress: null });
       process.stdout.write(`  failed: ${err.message}\n`);
+      const retry = queueRetry(task.id);
+      if (retry) process.stdout.write(`  retry ${retry.id} queued on ${retry.runner}\n`);
     }
   }
 }
@@ -2348,6 +2413,7 @@ export {
   claimNextTask,
   describeLock,
   finishTask,
+  queueRetry,
   findRunner,
   touchTask,
   lockIsLive,

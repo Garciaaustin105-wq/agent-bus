@@ -656,12 +656,12 @@ await check("the sessions list shows every Claude session with what it burned �
   }
 });
 
-await check("the savings counter measures a REAL compaction — drop times every remaining turn, exactly", async () => {
+await check("the savings counter measures a REAL compaction — drop times the turns it could still have fitted, less the summary pass", async () => {
   // A transcript with one labelled compaction: two fat turns, the marker, two
   // slim turns after. curve = read+write+input per turn, so
   //   curve = [100500, 106200, 8100, 8350], compactions = [2]
-  //   drop = 106200 - 8100 = 98100, remaining turns after it = 2
-  //   saved = 98100 x 2 = 196200
+  //   drop = 106200 - 8100 = 98100, both later turns fit under 200k = 2
+  //   saved = 98100 x 2 - 106200 (the summary pass re-read) = 90000
   const dir = path.join(
     os.homedir(),
     ".claude",
@@ -683,13 +683,13 @@ await check("the savings counter measures a REAL compaction — drop times every
     let html = "";
     for (let i = 0; i < 20; i++) {
       html = await (await GET(`${base}/`)).text();
-      if (html.includes("196,200")) break;
+      if (html.includes("90,000")) break;
       await new Promise((r) => setTimeout(r, 250));
     }
     const panel = (html.split("<h2>Tokens saved")[1] ?? "").split("<h2")[0];
     assert.ok(
-      panel.includes("196,200"),
-      "the exact drop x remaining turns is the headline number"
+      panel.includes("90,000"),
+      "drop x fitted turns less the summary pass is the headline number"
     );
     assert.ok(panel.includes("compburn"), "the session is named in the per-session table");
     assert.ok(
@@ -704,7 +704,7 @@ await check("the savings counter measures a REAL compaction — drop times every
 await check("the hub's own page totals tokens saved across EVERY space, one row per space", async () => {
   // Dogfood report 2026-09-13: "on the this hub page i dont see the tokens
   // saved". Sessions open in an app's folder, so the hub's own project alone
-  // reads 0. The same compaction as above (196,200), but in proj-a.
+  // reads 0. The same compaction as above (90,000), but in proj-a.
   const dir = path.join(os.homedir(), ".claude", "projects", projA.replace(/[^a-zA-Z0-9]/g, "-"));
   fs.mkdirSync(dir, { recursive: true });
   const turn = (r, w, i) =>
@@ -723,15 +723,15 @@ await check("the hub's own page totals tokens saved across EVERY space, one row 
     }
     const panel = (html.split("<h2>Tokens saved")[1] ?? "").split("<h2")[0];
     const headline = panel.split("saved by compacting:")[1]?.split("</div>")[0] ?? "";
-    assert.ok(headline.includes("196,200"), `the hub headline counts the app space's compaction: ${headline}`);
-    assert.ok(/<td>proj-a<\/td>\s*<td class="num">1<\/td>\s*<td class="num">196,200<\/td>/.test(panel),
+    assert.ok(headline.includes("90,000"), `the hub headline counts the app space's compaction: ${headline}`);
+    assert.ok(/<td>proj-a<\/td>\s*<td class="num">1<\/td>\s*<td class="num">90,000<\/td>/.test(panel),
       "a by-space row names proj-a with its compactions and its exact saving");
     assert.ok(/<td>this hub<\/td>\s*<td class="num">0<\/td>\s*<td class="num">0<\/td>/.test(panel),
       "the hub's own project is its own row, honestly zero");
     assert.ok(!panel.includes("spacecom"), "per-session rows stay on the space's own page");
     const app = await (await GET(`${base}/?p=proj-a`)).text();
     const appPanel = (app.split("<h2>Tokens saved")[1] ?? "").split("<h2")[0];
-    assert.ok(appPanel.includes("196,200") && appPanel.includes("spacecom"), "the space's own page has the session");
+    assert.ok(appPanel.includes("90,000") && appPanel.includes("spacecom"), "the space's own page has the session");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

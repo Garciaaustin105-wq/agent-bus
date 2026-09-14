@@ -10,6 +10,13 @@
  * see; a suggestion with its reason attached can be argued with, and a
  * recommendation that is ignored is also data (it did not earn trust yet).
  *
+ * ROLES are the one place the bus DOES choose (the user, 2026-09-14: rules
+ * must not name anyone's models — "make the agent bus pick which ai it will
+ * need to fill for these roles"). A task that names a role, or is big enough
+ * to imply one, is pinned to the runner that role's measurements favour, and
+ * the reply says who and why. Nothing measured yet means no pin: the lane's
+ * default runs and the advisory line rides along, as before.
+ *
  * Same philosophy as blockers.mjs: dumb, deterministic, explainable. A match
  * nobody can audit is worth less than a rule everybody can check, so every
  * considered runner carries the why — picked or skipped, both.
@@ -31,8 +38,19 @@ export function extractHistory(tasks) {
       status: t.status,
       chars: typeof t.result === "string" ? t.result.length : 0,
       at: t.doneAt ?? t.at ?? "",
+      // How long the run took, when both ends were stamped. An old task
+      // without startedAt is still evidence of an outcome, just not of speed.
+      ms: t.startedAt && t.doneAt ? Date.parse(t.doneAt) - Date.parse(t.startedAt) : null,
+      empty: t.status === "done" && isEmptyAnswer(t.result),
     }));
 }
+
+/**
+ * The worker's marker for a run that thought but never answered. It counts as
+ * done on the queue (the thinking is still worth reading), but for routing it
+ * is a miss, the same as a failure.
+ */
+export const isEmptyAnswer = (result) => typeof result === "string" && result.startsWith("[no final answer");
 
 /**
  * Per-runner record and verdict — the "records when a model outperformed or
@@ -171,6 +189,118 @@ export function recommendRunner(task, runners, history) {
     considered: considered.map((c) => (c.id === pick.id ? { ...c, picked: true } : c)),
   };
 }
+
+/**
+ * The two jobs a handoff can be. Names only: which runner fills each is
+ * measured, per machine, from that machine's own finished tasks.
+ */
+export const ROLES = {
+  quick: "an ordinary job, about one file's worth: the fastest runner that reliably answers",
+  deep: "a long or tricky job: the runner that most reliably returns a full answer",
+};
+
+/** Past this many prompt tokens (four chars each) a job is long: deep. */
+export const DEEP_PROMPT_TOKENS = 2000;
+
+/** A task's role: the one it names, else sized from its prompt. */
+export function inferRole(task) {
+  if (typeof task?.role === "string" && Object.hasOwn(ROLES, task.role)) return task.role;
+  return Math.ceil(String(task?.prompt ?? "").length / 4) > DEEP_PROMPT_TOKENS ? "deep" : "quick";
+}
+
+/** A runner needs this many finishes before its record can choose for a role. */
+export const MEASURED_FINISHES = 3;
+/** quick only considers runners that miss (fail or come back empty) at most this often. */
+export const QUICK_MAX_MISS_RATE = 0.25;
+
+/**
+ * Fill a role from measurements. Returns null when nothing is eligible, else
+ * {id, role, cold, why, considered: [{id, picked, why}]}.
+ *
+ * Gates, as recommendRunner: enabled, not in `exclude` (already tried on this
+ * task), prompt fits ctx, not on a three-failure streak. Then over each
+ * survivor's last ten finishes: misses = failed + empty answers.
+ *   quick: among measured runners missing at most 25%, the lowest median run
+ *          time; if none qualifies, the deep ordering.
+ *   deep:  among measured runners, the fewest misses, then the longest
+ *          average answer.
+ * Ties break alphabetical. With no runner measured (3 finishes), the first
+ * eligible one is returned with cold: true — task_add does not pin a cold
+ * pick; a retry, which has to go somewhere, does.
+ */
+export function pickForRole(role, task, runners, history, exclude = []) {
+  const prompt = String(task?.prompt ?? "");
+  const promptTokens = Math.ceil(prompt.length / 4);
+  const by = {};
+  for (const h of history ?? []) (by[h.runner] ||= []).push(h);
+
+  const considered = [];
+  const survivors = [];
+  for (const r of runners ?? []) {
+    if (!r || !r.id || !r.enabled) continue;
+    if (exclude.includes(r.id)) {
+      considered.push({ id: r.id, picked: false, why: "already tried on this task" });
+      continue;
+    }
+    if (r.ctx && promptTokens > Math.floor(r.ctx * 0.9)) {
+      considered.push({ id: r.id, picked: false, why: `prompt (~${promptTokens.toLocaleString()} tokens) would not fit its ctx (${r.ctx.toLocaleString()})` });
+      continue;
+    }
+    const rec = (by[r.id] ?? []).slice(-10);
+    let streak = 0;
+    while (streak < rec.length && rec[rec.length - 1 - streak].status === "failed") streak++;
+    if (streak >= 3) {
+      considered.push({ id: r.id, picked: false, why: `failed its last ${streak} — needs to prove itself first` });
+      continue;
+    }
+    const n = rec.length;
+    const misses = rec.filter((h) => h.status === "failed" || h.empty).length;
+    const answers = rec.filter((h) => h.status === "done" && !h.empty);
+    const times = answers.map((h) => h.ms).filter((ms) => Number.isFinite(ms) && ms >= 0).sort((a, b) => a - b);
+    const medianMs = times.length ? times[Math.floor((times.length - 1) / 2)] : null;
+    const avgChars = answers.length ? Math.round(answers.reduce((a, h) => a + h.chars, 0) / answers.length) : 0;
+    const s = { id: r.id, n, measured: n >= MEASURED_FINISHES, missRate: n ? misses / n : 0, medianMs, avgChars };
+    survivors.push(s);
+    considered.push({
+      id: r.id,
+      picked: false,
+      why: s.measured
+        ? `${misses} miss${misses === 1 ? "" : "es"} in its last ${n}` +
+          (medianMs != null ? `, median ${Math.round(medianMs / 1000)} s` : "") +
+          (avgChars ? `, answers ~${avgChars.toLocaleString()} chars` : "")
+        : `only ${n} finish${n === 1 ? "" : "es"} — not measured yet`,
+    });
+  }
+  if (!survivors.length) return null;
+
+  const done = (pick, cold, why) => ({
+    id: pick.id,
+    role,
+    cold,
+    why,
+    considered: considered.map((c) => (c.id === pick.id ? { ...c, picked: true } : c)),
+  });
+  const measured = survivors.filter((s) => s.measured);
+  if (!measured.length) {
+    return done(survivors[0], true, `no runner has ${MEASURED_FINISHES} finishes yet — first eligible; outcomes will teach the router`);
+  }
+  const reliable = (a, b) => a.missRate - b.missRate || b.avgChars - a.avgChars || a.id.localeCompare(b.id);
+  const whyOf = (s) => considered.find((c) => c.id === s.id).why;
+  if (role === "quick") {
+    const fast = measured
+      .filter((s) => s.missRate <= QUICK_MAX_MISS_RATE && s.medianMs != null)
+      .sort((a, b) => a.medianMs - b.medianMs || a.missRate - b.missRate || a.id.localeCompare(b.id));
+    if (fast.length) return done(fast[0], false, `fastest that reliably answers: ${whyOf(fast[0])}`);
+    const best = measured.sort(reliable)[0];
+    return done(best, false, `none is both fast and reliable, so the most reliable: ${whyOf(best)}`);
+  }
+  const best = measured.sort(reliable)[0];
+  return done(best, false, `most reliable, fullest answers: ${whyOf(best)}`);
+}
+
+/** The one-line reply when task_add pins a role's pick. */
+export const routedLine = (pick) =>
+  `Routed to ${pick.id} for the ${pick.role} role — ${pick.why}. Pass runner_id to choose another.`;
 
 /** The one-line suggestion task_add appends — advisory, with the why attached. */
 export const suggestLine = (rec) =>

@@ -75,6 +75,12 @@ export function scanTranscript(text) {
     compactions: [], // curve INDEX of the turn after each compaction
   };
   const nameOf = {}; // tool_use_id -> tool name
+  // Claude Code writes ONE LINE PER CONTENT BLOCK, and every line of a message
+  // repeats that message's usage. Counted per line, turns and re-reads come out
+  // about 2x too high (measured 2026-09-14 over 18 real sessions). Usage is
+  // counted once per message.id; a line with no id still counts, and the
+  // content blocks on every line are still read.
+  const counted = new Set();
   const pathOf = {}; // tool_use_id -> file path, Read only
 
   for (const line of String(text ?? "").split("\n")) {
@@ -90,7 +96,9 @@ export function scanTranscript(text) {
     }
 
     const usage = x?.message?.usage;
-    if (x?.type === "assistant" && usage) {
+    const msgId = x?.message?.id;
+    if (x?.type === "assistant" && usage && !(msgId && counted.has(msgId))) {
+      if (msgId) counted.add(msgId);
       const read = usage.cache_read_input_tokens || 0;
       const write = usage.cache_creation_input_tokens || 0;
       const input = usage.input_tokens || 0;
@@ -294,14 +302,12 @@ export function baselineFrom(scans, opts = {}) {
 }
 
 /**
- * What compacting actually saved, in exact tokens (problem/saved-counter-wrong-frame,
+ * What compacting actually saved, in re-read tokens (problem/saved-counter-wrong-frame,
  * the user's decisive reframing: "the point of token saved was by compacting
  * sessions and bus to help cloud agents not have to reread everything").
  *
- * The arithmetic is exact because the curve is exact: a compaction drops the
- * context a session re-reads on every turn, and the drop — multiplied by every
- * turn the session ran after it — is the re-read it never paid. No counterfactual,
- * no rates, no estimate: drop × remaining turns, summed over every compaction.
+ * A compaction drops the context a session re-reads on every turn; each turn
+ * after it, the session did not re-read the drop.
  *
  * But a claim's window ends at the NEXT compaction, not at the end of the
  * session (problem/saved-counter-compaction-window, the user's report that
@@ -312,9 +318,22 @@ export function baselineFrom(scans, opts = {}) {
  * long, many-compaction session alone claimed 32.5B that no session could
  * ever have spent — a session cannot hold its pre-compaction context past the
  * context limit, so "compacted never" is not a counterfactual it could live.
- * drop × turns until the next compaction (the last one keeps the tail) is the
- * honest ceiling: generous while it was the only reset in sight, capped the
- * moment the real data says another reset happened.
+ *
+ * Even that window overclaimed (the user, 2026-09-14: "the math is wrong on the
+ * savings vs what you found today" — it showed 9.8B over sessions whose whole
+ * bill was ~0.56B weighted). Without the compaction the old context would have
+ * kept growing by what the session added, and hit the context limit within a
+ * few turns — a forced compaction then. So a claim counts only the turns the
+ * uncompacted context could still have fitted, and pays back the summary pass,
+ * which re-read the whole old context once:
+ *
+ *   saved = drop × (turns before the next compaction while
+ *           pre + (curve[i] - curve[at]) <= limit)  -  pre,   never below 0
+ *
+ * limit is the context window the session evidently had: 1M when any turn held
+ * more than 200k, else 200k. Over those 18 sessions this gives ~211M re-read
+ * tokens saved of ~4.5B re-read — about 5%. Re-reads bill at a tenth of fresh
+ * input; the unit stays tokens so the number stays countable.
  *
  * Compaction points come from the labelled transcript markers, or — for tools
  * that do not label them — the same double-gated curve-drop inference
@@ -341,6 +360,7 @@ export function compactionSavings(scans) {
   const per = [];
   for (const scan of scans || []) {
     const curve = scan?.curve || [];
+    const limit = curve.some((c) => c > 200_000) ? 1_000_000 : 200_000;
     let sessionSaved = 0;
     let sessionEvents = 0;
     const points = compactionPoints(scan);
@@ -352,10 +372,13 @@ export function compactionSavings(scans) {
       // smaller context's, and the earlier drop has no more to give.
       const at = points[k];
       if (at > 0 && at < curve.length) {
-        const drop = curve[at - 1] - curve[at];
+        const pre = curve[at - 1];
+        const drop = pre - curve[at];
         if (drop > 0) {
           const until = k + 1 < points.length ? points[k + 1] : curve.length;
-          sessionSaved += drop * (until - at);
+          let fitted = 0;
+          while (at + fitted < until && pre + (curve[at + fitted] - curve[at]) <= limit) fitted++;
+          sessionSaved += Math.max(0, drop * fitted - pre);
           sessionEvents++;
         }
       }

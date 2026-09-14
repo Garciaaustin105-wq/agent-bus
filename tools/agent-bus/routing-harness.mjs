@@ -23,8 +23,8 @@ import path from "node:path";
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "agent-bus-routing-"));
 process.env.AGENT_BUS_PROJECT = HOME;
 
-const { extractHistory, routingVerdicts, recommendRunner, suggestLine } = await import("./routing.mjs");
-const { callTool, asActor, finishTask, claimNextTask } = await import("./server.mjs");
+const { extractHistory, routingVerdicts, recommendRunner, suggestLine, ROLES, inferRole, pickForRole } = await import("./routing.mjs");
+const { callTool, asActor, finishTask, claimNextTask, queueRetry, COST_RULES } = await import("./server.mjs");
 
 let pass = 0;
 let fail = 0;
@@ -194,6 +194,85 @@ check("suggestLine-is-one-line-with-the-pin-instruction", () => {
   assert.equal(suggestLine(null), "", "null recommendation renders as nothing");
 });
 
+/* ── roles: the bus fills them from its own measurements ─────────────────── */
+
+// A runner's last finishes: n of them, each ms long, done unless told otherwise.
+const H = (runner, n, { ms = 30000, status = "done", empty = false, chars = 1000 } = {}) =>
+  Array.from({ length: n }, () => ({ runner, status, chars, ms, empty, at: "2026-09-14T00:00:00Z" }));
+const R = ["fast", "flaky", "steady"].map((id) => ({ id, enabled: true }));
+
+check("extractHistory-records-how-long-a-run-took-and-whether-it-came-back-empty", () => {
+  const h = extractHistory([
+    { status: "done", model: "a", result: "the answer", startedAt: "2026-09-14T00:00:00.000Z", doneAt: "2026-09-14T00:00:29.000Z" },
+    { status: "done", model: "a", result: "[no final answer — the model returned nothing. Its thinking so far:]", startedAt: "2026-09-14T00:00:00.000Z", doneAt: "2026-09-14T00:01:00.000Z" },
+    { status: "failed", model: "a", result: "boom" },
+  ]);
+  assert.deepEqual(h.map((x) => [x.ms, x.empty]), [[29000, false], [60000, true], [null, false]]);
+});
+
+check("inferRole-honours-an-explicit-role-else-sizes-the-prompt", () => {
+  assert.deepEqual(Object.keys(ROLES).sort(), ["deep", "quick"]);
+  assert.equal(inferRole({ role: "deep", prompt: "x" }), "deep");
+  assert.equal(inferRole({ role: "quick", prompt: "x".repeat(20000) }), "quick");
+  assert.equal(inferRole({ prompt: "x".repeat(8000) }), "quick", "2,000 tokens is still one ordinary job");
+  assert.equal(inferRole({ prompt: "x".repeat(8004) }), "deep", "past 2,000 tokens is a long job");
+  assert.equal(inferRole({ role: "toString", prompt: "x" }), "quick", "an inherited key is not a role");
+});
+
+check("quick-picks-the-fastest-runner-that-reliably-answers-and-skips-a-fast-flaky-one", () => {
+  const h = [...H("fast", 5, { ms: 30000 }), ...H("flaky", 3, { ms: 10000 }), ...H("flaky", 2, { ms: 10000, empty: true }), ...H("steady", 5, { ms: 90000 })];
+  const p = pickForRole("quick", { prompt: "p" }, R, h);
+  assert.equal(p.id, "fast", JSON.stringify(p));
+  assert.equal(p.cold, false);
+  assert.match(p.considered.find((c) => c.id === "flaky").why, /miss/);
+  assert.ok(p.considered.every((c) => c.why), "every considered runner carries a why");
+});
+
+check("failures-count-as-misses-just-like-empty-answers", () => {
+  const h = [...H("fast", 5, { ms: 30000 }), ...H("flaky", 3, { ms: 10000 }), ...H("flaky", 2, { ms: 10000, status: "failed" })];
+  assert.equal(pickForRole("quick", {}, R, h).id, "fast");
+});
+
+check("deep-picks-the-most-reliable-then-the-fullest-answers", () => {
+  const h = [...H("fast", 4, { chars: 1200 }), ...H("fast", 1, { empty: true }), ...H("steady", 5, { ms: 90000, chars: 900 })];
+  assert.equal(pickForRole("deep", {}, R, h).id, "steady", "fewer misses wins over speed");
+  const tie = [...H("fast", 5, { chars: 1200 }), ...H("steady", 5, { ms: 90000, chars: 2000 })];
+  assert.equal(pickForRole("deep", {}, R, tie).id, "steady", "same reliability: the fuller answers");
+  assert.equal(pickForRole("quick", {}, R, tie).id, "fast", "and quick still takes the faster one");
+});
+
+check("fewer-than-three-finishes-is-unmeasured-and-says-so", () => {
+  const cold = pickForRole("quick", {}, R, H("fast", 2, { ms: 1 }));
+  assert.equal(cold.cold, true, "nothing measured: a cold pick, flagged");
+  assert.match(cold.why, /no runner has 3 finishes/);
+  const h = [...H("fast", 2, { ms: 1 }), ...H("steady", 3, { ms: 90000 })];
+  assert.equal(pickForRole("quick", {}, R, h).id, "steady", "a measured runner beats an unmeasured faster one");
+});
+
+check("the-gates-still-hold-disabled-ctx-streak-and-exclude", () => {
+  const h = [...H("fast", 5, { ms: 1000 }), ...H("steady", 5, { ms: 90000 }), ...H("flaky", 5, { ms: 5000 })];
+  const runners = [{ id: "fast", enabled: false }, { id: "flaky", enabled: true, ctx: 1000 }, { id: "steady", enabled: true }];
+  assert.equal(pickForRole("quick", { prompt: "x".repeat(4000) }, runners, h).id, "steady", "disabled and too-small ctx both skipped");
+  // fast misses 3 in 10, steady 5 in 10: on record alone deep takes fast. Only
+  // the streak (fast's last three all failed) can skip it.
+  const streak = [...H("fast", 7), ...H("fast", 3, { status: "failed" }), ...H("steady", 5, { status: "failed" }), ...H("steady", 5)];
+  assert.equal(pickForRole("deep", {}, R, streak).id, "steady", "three failures in a row skipped");
+  assert.match(pickForRole("deep", {}, R, streak).considered.find((c) => c.id === "fast").why, /failed its last 3/);
+  assert.equal(pickForRole("quick", {}, R, h, ["fast"]).id, "flaky", "an excluded runner is skipped");
+  assert.match(pickForRole("quick", {}, R, h, ["fast"]).considered.find((c) => c.id === "fast").why, /already tried/);
+  assert.equal(pickForRole("quick", {}, [{ id: "off", enabled: false }], h), null, "nothing eligible");
+  assert.equal(pickForRole("quick", {}, R, h, ["fast", "flaky", "steady"]), null, "everything excluded");
+});
+
+check("the-cost-rules-every-agent-is-told-name-no-runner-or-model", () => {
+  const listed = JSON.parse(fs.readFileSync(new URL("./runners.json", import.meta.url), "utf8")).runners;
+  const names = listed.flatMap((r) => [r.id, r.model, String(r.label ?? "").split(/[\s:]/)[0]]).filter(Boolean);
+  for (const n of [...names, "gpt", "glm", "qwen", "llama", "claude"]) {
+    assert.ok(!COST_RULES.toLowerCase().includes(n.toLowerCase()), `COST_RULES names "${n}"`);
+  }
+  assert.ok(COST_RULES.includes("role"), "it tells agents to ask for a role instead");
+});
+
 /* ── the real-state wiring ────────────────────────────────────────────────── */
 
 const readState = () =>
@@ -246,6 +325,48 @@ check("register-lists-open-blockers-for-the-joiner", () => {
   asActor("solver", () => callTool("unblock", { id, how: "started ollama" }));
   const after = asActor("joiner3", () => callTool("register", { name: "joiner3", lane: "y" }));
   assert.ok(after.includes("No open blockers"), `got: ${after}`);
+});
+
+check("task_add-refuses-a-role-that-is-not-one", () => {
+  let out;
+  try { out = asActor("queuer", () => callTool("task_add", { lane: "seed", title: "r", prompt: "p", role: "fastest" })); } catch (e) { out = e.message; }
+  assert.ok(out.includes("Unknown role"), `got: ${out}`);
+  assert.ok(!readState().tasks.some((t) => t.title === "r"), "and nothing was queued");
+});
+
+check("task_add-with-a-measured-role-routes-it-and-says-why", () => {
+  seedTask("gpt-oss", "done"); // the third finish: now measured
+  const out = asActor("queuer", () => callTool("task_add", { lane: "local", title: "routed", prompt: "the spec", role: "quick" }));
+  assert.match(out, /Routed to gpt-oss for the quick role — .+runner_id/);
+  const t = readState().tasks.find((x) => x.title === "routed");
+  assert.deepEqual([t.runner_id, t.role], ["gpt-oss", "quick"]);
+  const pinned = asActor("queuer", () => callTool("task_add", { lane: "local", title: "pinned2", prompt: "p", role: "deep", runner_id: "glm" }));
+  assert.ok(!pinned.includes("Routed to"), "an explicit runner_id is never second-guessed");
+  assert.deepEqual(readState().tasks.find((x) => x.title === "pinned2").runner_id, "glm");
+});
+
+check("a-miss-is-retried-once-on-a-different-runner-never-twice", () => {
+  const miss = (title, patch) => {
+    asActor("seeder", () => callTool("task_add", { lane: "retry", title, prompt: "p", role: "quick" }));
+    const t = readState().tasks.find((x) => x.title === title);
+    claimNextTask("retry");
+    finishTask(t.id, patch);
+    return t.id;
+  };
+  const failed = miss("m1", { status: "failed", result: "boom", model: "gpt-oss" });
+  const r = queueRetry(failed);
+  assert.ok(r && r.runner !== "gpt-oss", `retried elsewhere: ${JSON.stringify(r)}`);
+  const retry = readState().tasks.find((x) => x.id === r.id);
+  assert.deepEqual([retry.retryOf, retry.runner_id, retry.prompt, retry.status, retry.lane], [failed, r.runner, "p", "queued", "retry"]);
+  assert.equal(queueRetry(failed), null, "the same miss is not retried twice");
+  claimNextTask("retry");
+  finishTask(r.id, { status: "failed", result: "boom again", model: r.runner });
+  assert.equal(queueRetry(r.id), null, "a retry that misses is not retried again");
+  const empty = miss("m2", { status: "done", result: "[no final answer — the model returned nothing. Its thinking so far:]", model: "gpt-oss" });
+  assert.ok(queueRetry(empty), "an empty answer is a miss too");
+  const fine = miss("m3", { status: "done", result: "a real answer", model: "gpt-oss" });
+  assert.equal(queueRetry(fine), null, "a real answer is never retried");
+  assert.equal(queueRetry("t-nope"), null, "an unknown id is nothing");
 });
 
 fs.rmSync(HOME, { recursive: true, force: true });

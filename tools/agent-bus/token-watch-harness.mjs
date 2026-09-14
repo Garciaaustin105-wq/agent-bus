@@ -510,14 +510,27 @@ check("approx-tokens-is-four-chars", () => {
 
 const MARK = '{"type":"system","compactMetadata":{}}';
 
-check("compactionSavings-labels-drop-x-remaining-exactly", () => {
-  // curve = [100500, 106200, 8100, 8350], compactions = [2]
-  // drop = 106200 - 8100 = 98100; remaining turns = 2; saved = 196200
+check("usage-is-counted-once-per-message-id", () => {
+  // Claude Code writes one line per content block, each repeating the usage.
+  const a = JSON.stringify({ type: "assistant", message: { id: "msg_1", usage: U(1000, 100, 50, 25), content: [{ type: "thinking" }] } });
+  const b = JSON.stringify({ type: "assistant", message: { id: "msg_1", usage: U(1000, 100, 50, 25), content: [use("t1", "Bash", {})] } });
+  const c = JSON.stringify({ type: "assistant", message: { id: "msg_2", usage: U(1200, 10, 5, 7), content: [] } });
+  const s = scanTranscript([a, b, c, turn(U(1300))].join("\n"));
+  eq(s.turns, 3, "two lines of msg_1 are one turn; a line with no id still counts");
+  eq(s.read, 1000 + 1200 + 1300, "re-reads counted once per message");
+  eq(s.output, 25 + 7, "output counted once per message");
+  eq(s.curve.join(","), "1150,1215,1300", "one curve point per message");
+});
+
+check("compactionSavings-labels-drop-x-fitted-turns-less-the-summary-pass", () => {
+  // curve = [100500, 106200, 8100, 8350], compactions = [2], limit 200k
+  // drop = 98100; both later turns fit (106200 + 250 <= 200k), so 2 turns;
+  // the summary pass re-read 106200 once: saved = 98100 x 2 - 106200 = 90000
   const t = [turn(U(90000, 10000, 500)), turn(U(105000, 1000, 200)), MARK, turn(U(5000, 3000, 100)), turn(U(8200, 100, 50))].join("\n");
   const r = compactionSavings([scanTranscript(t)]);
-  eq(r.total, 196200, "labelled compaction total");
+  eq(r.total, 90000, "labelled compaction total");
   eq(r.events, 1, "one event");
-  eq(r.per[0].tokens, 196200, "per-session aligned");
+  eq(r.per[0].tokens, 90000, "per-session aligned");
 });
 
 check("compactionSavings-infers-unlabelled-with-the-baseline-gates", () => {
@@ -525,7 +538,7 @@ check("compactionSavings-infers-unlabelled-with-the-baseline-gates", () => {
   // < 0.75, absolute 98100 > 30000) is inferred.
   const t = [turn(U(90000, 10000, 500)), turn(U(106200, 0, 0)), turn(U(8100, 0, 0)), turn(U(8350, 0, 0))].join("\n");
   const r = compactionSavings([scanTranscript(t)]);
-  eq(r.total, (106200 - 8100) * 2, "inferred compaction total");
+  eq(r.total, (106200 - 8100) * 2 - 106200, "inferred compaction total");
   eq(r.events, 1, "one inferred event");
 });
 
@@ -533,7 +546,7 @@ check("compactionSavings-a-later-compaction-caps-the-earlier-claim", () => {
   // curve = [100500, 106200, 8100, 8350, 90000, 5000, 5100], compactions = [2, 5]
   // (problem/saved-counter-compaction-window). Event 1's claim stops at the
   // next compaction, not at the end of the session: drop 98100 x 3 turns
-  // (turns 2,3,4) = 294300. Event 2 keeps the tail: drop 85000 x 2 = 170000.
+  // (turns 2,3,4) - 106200 = 188100. Event 2 keeps the tail: 85000 x 2 - 90000.
   const t = [
     turn(U(90000, 10000, 500)), turn(U(105000, 1000, 200)), MARK,
     turn(U(5000, 3000, 100)), turn(U(8200, 100, 50)), turn(U(88000, 1500, 500)), MARK,
@@ -541,8 +554,20 @@ check("compactionSavings-a-later-compaction-caps-the-earlier-claim", () => {
   ].join("\n");
   const r = compactionSavings([scanTranscript(t)]);
   eq(r.events, 2, "two events");
-  eq(r.total, 98100 * 3 + 85000 * 2, "first claim capped by the second compaction");
-  eq(r.per[0].tokens, 98100 * 3 + 85000 * 2, "per-session aligned");
+  eq(r.total, 98100 * 3 - 106200 + 85000 * 2 - 90000, "first claim capped by the second compaction");
+  eq(r.per[0].tokens, 98100 * 3 - 106200 + 85000 * 2 - 90000, "per-session aligned");
+});
+
+check("compactionSavings-stops-where-the-old-context-would-have-hit-the-limit", () => {
+  // pre 190000, then 10000 growing 5000 a turn. Uncompacted it would hold
+  // 190000, 195000, 200000, then 205000 > 200k: a forced compaction anyway.
+  // Only 3 turns count: 180000 x 3 - 190000 = 350000 (not 180000 x 5).
+  const t = [turn(U(190000)), MARK, ...[10000, 15000, 20000, 25000, 30000].map((r) => turn(U(r)))].join("\n");
+  eq(compactionSavings([scanTranscript(t)]).total, 350000, "capped at the context limit");
+  const big = [turn(U(300000)), turn(U(310000)), MARK, ...[10000, 15000, 20000, 25000, 30000].map((r) => turn(U(r)))].join("\n");
+  eq(compactionSavings([scanTranscript(big)]).total, 300000 * 5 - 310000, "a session that held over 200k had the 1M window");
+  const tiny = [turn(U(100000)), MARK, turn(U(90000))].join("\n");
+  eq(compactionSavings([scanTranscript(tiny)]).total, 0, "saving less than its summary pass claims nothing, never below 0");
 });
 
 check("compactionSavings-tail-marker-claims-nothing", () => {
