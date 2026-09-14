@@ -691,6 +691,18 @@ const TOOLS = [
   },
 ];
 
+// The cost rules every joining agent is told, whatever it has read. Measured,
+// not taste: build-rules.md H16, J5, J6 and K2 carry the numbers. They ride on
+// register() rather than on the first-time board, because the agents that
+// most need them are the ones that have been here before.
+export const COST_RULES = [
+  "COST RULES (docs/build-rules.md H16, J5, J6, K2) — every turn re-reads the whole conversation, so:",
+  "- Compact at 80-100k tokens of context, right after a commit. Never let a session grow toward the 1M window.",
+  "- Hand off a whole file's worth of work at once, never one small function. Code under ~30 lines you write yourself; checks first either way.",
+  "- gpt-oss for one ordinary file (~30 s); GLM for long or tricky bodies (~90 s). An empty answer: read done_reason, then retry once on the other runner.",
+  "- Do the bus steps for a commit in one command: claim && commit; release.",
+].join("\n");
+
 // The first-time rules, carried by the bus itself (see the board case). An
 // agent that arrives on a fresh install reads this on its first board() — no
 // human has to paste the README into it first.
@@ -758,6 +770,7 @@ function callTool(name, args) {
           others.length ? `Also active: ${others.join(", ")}.` : "No other agents are registered.",
           describeLock(state.lock),
           "Read board() before acting on any spec, and inbox() before touching git.",
+          COST_RULES,
           // §5's ask-at-startup: the bus asks every joining agent what it can
           // grant, because a capability nobody declared is a solver nobody can
           // find when someone is blocked.

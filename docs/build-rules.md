@@ -648,6 +648,46 @@ steer the work — a rule exists, a function is called that, a number was
 measured — and it predates a compaction, verify it. It costs one tool call.
 The wrong version costs whatever gets built on top of it.
 
+### H16. Compact at 80–100k, after a commit. Never let a session grow toward the 1M window.
+
+H13 says an auto-compaction pays for itself. This rule is about *when*.
+Re-reading is 98% of tokens (H1), so what a session costs is set by how big
+its context gets before it is cut.
+
+**Incident:** measured 2026-09-14 over all 18 lowvoltage-app transcripts
+(10,589 turns, deduped by message id). Two sessions ran on a 1M-token window and
+never compacted. They averaged 548k and 516k tokens of context per turn, and
+were **77% of everything the 18 sessions spent**. Capped by auto-compaction
+(about 170k), the same work would have cost roughly 70% less. Sessions that did
+auto-compact averaged 123k per turn.
+
+Replaying the same work, with the same new tokens and output per turn, compacted
+at a threshold T instead of at auto (~170k):
+
+    compact at   spend vs auto   compactions
+      130k           -11%           1.4x
+      100k           -18%           1.9x
+       80k           -23%           2.5x
+       60k           -25%           3.6x
+
+Weights: output 5, input 1, cache read 0.1, cache write 1.25. Each compaction
+is charged at ~110 s and a ~4.5k-token summary.
+
+**Why not 60k:** the replay does not charge for re-reading files after a
+compaction (H14), or for the wall clock and misplaced certainty (H13). Those
+grow with the number of compactions, so the real optimum is above where the
+table bottoms out. Past 80k the extra saving is 2%, for half again as many
+compactions.
+
+**Practical form:**
+- When context passes about 80–100k, finish the current step, commit, and
+  compact.
+- Before compacting, put what the next turn needs on the board or in a file
+  (H14).
+- After it, verify the load-bearing claim (H15).
+- A session on a 1M window gets the same threshold. The bigger window is room
+  for one large read, not permission to stop compacting.
+
 ---
 
 ## I. Editing files without breaking them
@@ -766,6 +806,46 @@ A returned task is a proposal to review, not a change to apply. Read it as you
 would a pull request from someone who could not see the repo — because that is
 exactly what it is.
 
+### J5. Hand off a whole file's worth of work, never one small function.
+
+A runner's tokens are free. The orchestrator's turns around each handoff are
+not: writing the prompt, launching it, reading the draft and fixing it is 2–4
+turns, and every one re-reads the whole conversation (H1). A 20-line spec for
+a 25-line function buys almost nothing and costs all of those turns.
+
+**Practical form:**
+- Batch every function in one file into one handoff: one launch, one review.
+- Code under about 30 lines, where the spec is nearly the code, you write
+  yourself, in the same turn as its check.
+- Checks are still written before either path, and verification never
+  delegates (J4).
+
+**Incident:** measured 2026-09-14 on a 1,237-turn camera-platform session,
+from its transcript deduped by message id. 153 runner calls generated about
+750k tokens, but only about 60k tokens of code landed. The 225 orchestrator
+turns spent on handoffs cost about 4.5x what writing that code directly would
+have: roughly 20% of the session's spend, for no saving. The one file handed
+off as a batch (seven functions, one launch, one review) was the one clear win.
+
+### J6. Pick the runner by the size of the job, and retry an empty answer once on the other.
+
+Measured 2026-09-14 over 153 calls on the same session:
+
+    runner          per call   tok/s   empty answers   answer size
+    gpt-oss:20b       29 s      122        11%          ~1.2k chars
+    glm-5.3-flash     86 s      117         6%          ~2.0k chars
+
+Both spend 92–95% of what they generate thinking, so neither is the slow part:
+the orchestrator's turns around them are (J5).
+
+**Practical form:**
+- gpt-oss for one file of ordinary code: three times faster.
+- GLM for long or tricky bodies, where a second attempt costs more than the
+  wait.
+- An empty `response` is a limit first (J2): read `done_reason` before blaming
+  the model. If it really is the model, retry once on the other runner rather
+  than the same one again.
+
 ---
 
 ## K. Running the bus itself
@@ -798,6 +878,20 @@ same failure at install time is why `projectRoot()` has to replace the constant.
 **The general rule:** when a wrong answer is indistinguishable from a right one,
 the input has to be stated explicitly, not inferred from ambient state. Ambient
 state is whatever the last tool left behind.
+
+### K2. Bus calls save no tokens. Do the bus steps for a commit in one command.
+
+The lock and the board keep agents out of each other's git work. That is what
+they are for, and it is worth paying for. But the tool call is not the only
+cost: every separate turn re-reads the whole conversation (H1).
+
+    node server.mjs claim <name> <path> "commit X" && git commit -m "…"; node server.mjs release <name>
+
+**Incident:** measured 2026-09-14 on a 1,237-turn camera-platform session:
+142 turns (11%) were bus calls alone, at 16.2M tokens of re-reading. Claim,
+commit and release done as three turns cost three times what one command
+costs, and they are no safer.
+
 ---
 
 ## L. Reporting yourself
