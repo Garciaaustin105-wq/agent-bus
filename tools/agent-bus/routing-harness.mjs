@@ -22,9 +22,18 @@ import path from "node:path";
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "agent-bus-routing-"));
 process.env.AGENT_BUS_PROJECT = HOME;
+// A fixture fleet, so no check depends on which models this machine has.
+const FLEET = path.join(HOME, "runners.json");
+fs.writeFileSync(FLEET, JSON.stringify({ runners: [
+  { id: "local-a", type: "ollama", model: "model-a", enabled: true, ctx: 32768 },
+  { id: "local-b", type: "ollama", model: "model-b", enabled: true, ctx: 32768 },
+  { id: "off", type: "ollama", model: "model-c", enabled: false },
+  { id: "cloud-a", type: "ollama", model: "model-d", enabled: true, ctx: 65536 },
+] }));
+process.env.AGENT_BUS_RUNNERS = FLEET;
 
 const { extractHistory, routingVerdicts, recommendRunner, suggestLine, ROLES, inferRole, pickForRole } = await import("./routing.mjs");
-const { callTool, asActor, finishTask, claimNextTask, queueRetry, COST_RULES } = await import("./server.mjs");
+const { callTool, asActor, finishTask, claimNextTask, queueRetry, COST_RULES, findRunner, readRunners } = await import("./server.mjs");
 
 let pass = 0;
 let fail = 0;
@@ -265,12 +274,54 @@ check("the-gates-still-hold-disabled-ctx-streak-and-exclude", () => {
 });
 
 check("the-cost-rules-every-agent-is-told-name-no-runner-or-model", () => {
-  const listed = JSON.parse(fs.readFileSync(new URL("./runners.json", import.meta.url), "utf8")).runners;
+  // The tracked template, plus this machine's own list when it has one.
+  const listed = ["./runners.example.json", "./runners.json"]
+    .map((f) => new URL(f, import.meta.url))
+    .filter((u) => fs.existsSync(u))
+    .flatMap((u) => JSON.parse(fs.readFileSync(u, "utf8")).runners);
   const names = listed.flatMap((r) => [r.id, r.model, String(r.label ?? "").split(/[\s:]/)[0]]).filter(Boolean);
   for (const n of [...names, "gpt", "glm", "qwen", "llama", "claude"]) {
     assert.ok(!COST_RULES.toLowerCase().includes(n.toLowerCase()), `COST_RULES names "${n}"`);
   }
   assert.ok(COST_RULES.includes("role"), "it tells agents to ask for a role instead");
+});
+
+check("the-shipped-runner-list-is-a-template-and-the-real-one-stays-local", () => {
+  const example = JSON.parse(fs.readFileSync(new URL("./runners.example.json", import.meta.url), "utf8"));
+  assert.ok(example.runners.length > 0, "the template shows each type");
+  assert.ok(example.runners.every((r) => r.enabled === false), "and runs nothing until someone fills it in");
+  const shipped = JSON.stringify(example).toLowerCase();
+  for (const n of ["gpt", "glm", "qwen", "llama3", "codestral", "mistral", "gemma", "deepseek", "claude"]) {
+    assert.ok(!shipped.includes(n), `runners.example.json names "${n}"`);
+  }
+  const ignored = fs.readFileSync(new URL("../../.gitignore", import.meta.url), "utf8").split(/\r?\n/);
+  assert.ok(ignored.includes("tools/agent-bus/runners.json"), "git ignores the machine's own list");
+  const code = ["./server.mjs", "./hub.mjs", "./routing.mjs"].map((f) => fs.readFileSync(new URL(f, import.meta.url), "utf8")).join("\n");
+  assert.doesNotMatch(code, /"(gpt-oss|glm|qwen[\w.:-]*|codestral)[^"]*"/i, "no runner or model is built into the code");
+});
+
+check("no-runners-file-is-named-never-guessed", () => {
+  const was = process.env.AGENT_BUS_RUNNERS;
+  try {
+    process.env.AGENT_BUS_RUNNERS = path.join(HOME, "missing.json");
+    assert.deepEqual(readRunners(), [], "no fallback runner appears");
+    assert.throws(() => findRunner(), /runners\.example\.json/, "the fix is named");
+    const broken = path.join(HOME, "broken.json");
+    fs.writeFileSync(broken, "{ not json");
+    process.env.AGENT_BUS_RUNNERS = broken;
+    assert.deepEqual(readRunners(), []);
+    assert.throws(() => findRunner(), /not valid JSON/);
+    const withDefault = path.join(HOME, "default.json");
+    fs.writeFileSync(withDefault, JSON.stringify({ default: "second", runners: [
+      { id: "first", type: "ollama", model: "m1", enabled: true },
+      { id: "second", type: "ollama", model: "m2", enabled: true },
+    ] }));
+    process.env.AGENT_BUS_RUNNERS = withDefault;
+    assert.equal(findRunner().id, "second", "the file's default wins over first-enabled");
+    assert.equal(findRunner("first").id, "first", "an asked-for id wins over the default");
+  } finally {
+    process.env.AGENT_BUS_RUNNERS = was;
+  }
 });
 
 /* ── the real-state wiring ────────────────────────────────────────────────── */
@@ -287,8 +338,8 @@ const seedTask = (model, status) => {
 };
 
 check("task_add-without-a-runner-id-rides-a-suggestion-with-its-reason", () => {
-  seedTask("gpt-oss", "done");
-  seedTask("gpt-oss", "done");
+  seedTask("local-a", "done");
+  seedTask("local-a", "done");
   const out = asActor("queuer", () => callTool("task_add", { lane: "local", title: "real", prompt: "the spec" }));
   assert.ok(out.includes("Queued t"), "the queue confirmation is still first");
   assert.match(out, /Routing suggestion: \S+ — .+ runner_id: "/);
@@ -297,14 +348,14 @@ check("task_add-without-a-runner-id-rides-a-suggestion-with-its-reason", () => {
 
 check("task_add-with-a-runner-id-does-not-second-guess-an-explicit-choice", () => {
   const out = asActor("queuer", () =>
-    callTool("task_add", { lane: "seed", title: "pinned", prompt: "p", runner_id: "codestral" }),
+    callTool("task_add", { lane: "seed", title: "pinned", prompt: "p", runner_id: "off" }),
   );
   assert.ok(!out.includes("Routing suggestion"), `got: ${out}`);
 });
 
 check("runners-attaches-each-runner-s-measured-record", () => {
   const out = asActor("looker", () => callTool("runners", {}));
-  assert.ok(out.includes("record: gpt-oss — 2 done"), `got:\n${out}`);
+  assert.ok(out.includes("record: local-a — 2 done"), `got:\n${out}`);
   assert.ok(out.includes("record: none yet"), "runners without history say so");
   assert.ok(out.includes("x "), "disabled entries still marked x");
 });
@@ -335,14 +386,14 @@ check("task_add-refuses-a-role-that-is-not-one", () => {
 });
 
 check("task_add-with-a-measured-role-routes-it-and-says-why", () => {
-  seedTask("gpt-oss", "done"); // the third finish: now measured
+  seedTask("local-a", "done"); // the third finish: now measured
   const out = asActor("queuer", () => callTool("task_add", { lane: "local", title: "routed", prompt: "the spec", role: "quick" }));
-  assert.match(out, /Routed to gpt-oss for the quick role — .+runner_id/);
+  assert.match(out, /Routed to local-a for the quick role — .+runner_id/);
   const t = readState().tasks.find((x) => x.title === "routed");
-  assert.deepEqual([t.runner_id, t.role], ["gpt-oss", "quick"]);
-  const pinned = asActor("queuer", () => callTool("task_add", { lane: "local", title: "pinned2", prompt: "p", role: "deep", runner_id: "glm" }));
+  assert.deepEqual([t.runner_id, t.role], ["local-a", "quick"]);
+  const pinned = asActor("queuer", () => callTool("task_add", { lane: "local", title: "pinned2", prompt: "p", role: "deep", runner_id: "cloud-a" }));
   assert.ok(!pinned.includes("Routed to"), "an explicit runner_id is never second-guessed");
-  assert.deepEqual(readState().tasks.find((x) => x.title === "pinned2").runner_id, "glm");
+  assert.deepEqual(readState().tasks.find((x) => x.title === "pinned2").runner_id, "cloud-a");
 });
 
 check("a-miss-is-retried-once-on-a-different-runner-never-twice", () => {
@@ -353,18 +404,18 @@ check("a-miss-is-retried-once-on-a-different-runner-never-twice", () => {
     finishTask(t.id, patch);
     return t.id;
   };
-  const failed = miss("m1", { status: "failed", result: "boom", model: "gpt-oss" });
+  const failed = miss("m1", { status: "failed", result: "boom", model: "local-a" });
   const r = queueRetry(failed);
-  assert.ok(r && r.runner !== "gpt-oss", `retried elsewhere: ${JSON.stringify(r)}`);
+  assert.ok(r && r.runner !== "local-a", `retried elsewhere: ${JSON.stringify(r)}`);
   const retry = readState().tasks.find((x) => x.id === r.id);
   assert.deepEqual([retry.retryOf, retry.runner_id, retry.prompt, retry.status, retry.lane], [failed, r.runner, "p", "queued", "retry"]);
   assert.equal(queueRetry(failed), null, "the same miss is not retried twice");
   claimNextTask("retry");
   finishTask(r.id, { status: "failed", result: "boom again", model: r.runner });
   assert.equal(queueRetry(r.id), null, "a retry that misses is not retried again");
-  const empty = miss("m2", { status: "done", result: "[no final answer — the model returned nothing. Its thinking so far:]", model: "gpt-oss" });
+  const empty = miss("m2", { status: "done", result: "[no final answer — the model returned nothing. Its thinking so far:]", model: "local-a" });
   assert.ok(queueRetry(empty), "an empty answer is a miss too");
-  const fine = miss("m3", { status: "done", result: "a real answer", model: "gpt-oss" });
+  const fine = miss("m3", { status: "done", result: "a real answer", model: "local-a" });
   assert.equal(queueRetry(fine), null, "a real answer is never retried");
   assert.equal(queueRetry("t-nope"), null, "an unknown id is nothing");
 });

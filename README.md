@@ -116,7 +116,7 @@ tools/agent-bus/
   hub-http-harness.mjs      the dashboard's HTTP edge: drive-by POSTs, DNS rebinding
   lock-harness.mjs          the state lock's stale-break and identity paths
   HANDOFF.md          how to write a spec a model can execute
-  runners.json        per-machine model runners (ctx/predict/temperature)
+  runners.example.json  template for runners.json, your machine's model runners (git-ignored)
 lessons/              the published lesson feed + how a lesson is submitted
 docs/
   build-rules.md      the live rulebook — read before any code
@@ -263,8 +263,10 @@ anything but a human. See `lessons/README.md` for the full contract.
 
 ## Finding the models on your machine
 
-The hub can only run what `runners.json` declares — so the first question on
-a new machine is "what do I have?" Don't answer by hand:
+The hub can only run what `runners.json` declares. That file is yours and git
+ignores it; copy `tools/agent-bus/runners.example.json` to start, since the bus
+ships no one's models. The first question on a new machine is "what do I
+have?" Don't answer by hand:
 
 ```
 node tools/agent-bus/server.mjs discover

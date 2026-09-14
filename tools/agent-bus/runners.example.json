@@ -1,0 +1,68 @@
+{
+  "_comment": [
+    "Which agents the bus can run, and how to invoke each one.",
+    "",
+    "START HERE: copy this file to runners.json beside it and fill in your own",
+    "models. git ignores runners.json — which models a machine has is its owner's",
+    "business, so the bus ships no one's list and no model is built into the code.",
+    "`node tools/agent-bus/server.mjs discover` finds the model servers on this",
+    "machine and prints ready-to-paste (disabled) entries.",
+    "",
+    "THE HUB CAN ONLY RUN WHAT IS LISTED THERE. The web form picks an id from the",
+    "file; it never sends a command. That is deliberate — a form that could pass a",
+    "shell string to a worker on your machine is a remote-code-execution hole with a",
+    "text box in front of it, even on loopback. Adding a runner is editing the file.",
+    "",
+    "default — the runner id `work` uses when none is given (AGENT_BUS_RUNNER",
+    "overrides it). Without one, the first enabled runner.",
+    "",
+    "type 'ollama' — POSTed to /api/generate. Nothing to install beyond the model.",
+    "An ollama cloud model answers the same way under its :cloud name. A cloud",
+    "runner sends its tasks' prompts off-machine: that is your choice to make.",
+    "type 'openai' — POSTed to <baseUrl>/chat/completions, the OpenAI-compatible",
+    "dialect LM Studio, llama.cpp server, vLLM and text-generation-webui all speak.",
+    "baseUrl is LOOPBACK-ONLY — a runner entry is the boundary of what a task can",
+    "reach, and that boundary is this machine.",
+    "type 'shell'  — spawned with the prompt written to STDIN. args are passed as a",
+    "list, never joined into a string, so nothing in a prompt can be read as an",
+    "argument or a second command.",
+    "",
+    "thinking: true for a model that reasons before answering — it needs a bigger",
+    "predict budget, or the answer comes back empty with the reasoning stranded.",
+    "predict is the output budget and ctx the context window, both in tokens.",
+    "Every entry below ships disabled: set enabled to true once model is real."
+  ],
+  "default": "example-ollama",
+  "runners": [
+    {
+      "id": "example-ollama",
+      "label": "example-ollama — replace the model",
+      "type": "ollama",
+      "model": "NAME-FROM-ollama-list",
+      "enabled": false,
+      "predict": 8000,
+      "ctx": 32768,
+      "note": "A model you have pulled: `ollama list` shows the names."
+    },
+    {
+      "id": "example-openai",
+      "label": "example-openai — a local OpenAI-compatible server",
+      "type": "openai",
+      "baseUrl": "http://127.0.0.1:1234/v1",
+      "model": "NAME-THE-SERVER-LISTS",
+      "enabled": false,
+      "predict": 8000,
+      "ctx": 32768,
+      "note": "Loopback only. `server.mjs discover` fills in the port and the model."
+    },
+    {
+      "id": "example-shell",
+      "label": "example-shell — a command-line agent",
+      "type": "shell",
+      "command": "COMMAND-ON-PATH",
+      "args": [],
+      "enabled": false,
+      "note": "Receives the prompt on stdin; its stdout is the answer."
+    }
+  ]
+}

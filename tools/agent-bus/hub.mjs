@@ -814,7 +814,7 @@ function renderStatusHtml(state, opts = {}) {
           r.label ?? r.id
         )}${r.enabled ? "" : " (not configured)"}</option>`
     )
-    .join("");
+    .join("") || `<option value="" disabled selected>No runners — copy runners.example.json to runners.json</option>`;
 
   const workers = [...liveWorkers.values()];
   const workerHtml = workers.length
@@ -1988,7 +1988,7 @@ function runDashboard(port) {
       try {
         let runner;
         try {
-          runner = findRunner(process.env.STEWARD_RUNNER || "qwen2.5:7b");
+          runner = findRunner(process.env.STEWARD_RUNNER);
         } catch {
           return; // no enabled runner — the steward stays dormant, bus unchanged
         }

@@ -1,3 +1,7 @@
 # Node — the bus has no dependencies, so only transient artifacts land here.
 node_modules/
 *.log
+
+# Which models a machine has is its owner's business. runners.example.json is
+# the tracked template; the copy you fill in stays on this machine.
+tools/agent-bus/runners.json

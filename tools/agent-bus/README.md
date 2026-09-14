@@ -257,8 +257,9 @@ State is isolated to a temp directory per run; it never touches the real bus.
 ## The worker
 
 `node tools/agent-bus/server.mjs work local` runs a loop: it takes the next
-queued task in its lane, runs it against the local model (`gpt-oss:20b` by
-default), and writes the answer back to the queue. Queue work from the hub
+queued task in its lane, runs it on a runner (`AGENT_BUS_RUNNER`, else
+`runners.json`'s `"default"`, else its first enabled one), and writes the
+answer back to the queue. Queue work from the hub
 window or with `server.mjs task local "title" "the whole prompt"`.
 
 The worker never touches the repo. Local output is a DRAFT that a person or the
@@ -272,17 +273,18 @@ task is never left stuck on "running" with no explanation.
 ## Picking which agent runs the work
 
 `tools/agent-bus/runners.json` declares every agent the bus may invoke, and the
-hub picker offers exactly that list. Three kinds:
+hub picker offers exactly that list. It is this machine's file and git ignores
+it: copy `runners.example.json` and fill in your models. With no file, or a
+broken one, nothing runs and the error says which. Three kinds:
 
-- `ollama` — POSTed to `/api/generate`. The local models are already listed.
+- `ollama` — POSTed to `/api/generate`. Nothing to install beyond the model.
 - `openai` — POSTed to `<baseUrl>/chat/completions`, the OpenAI-compatible
   dialect LM Studio, llama.cpp, vLLM and text-generation-webui all speak.
   Streamed like the ollama runner, with the same idle watchdog. **The baseUrl
   is loopback-only** — a runner entry is the boundary of what a queued task
   can reach, and that boundary is this machine. `server.mjs discover` finds
   these servers and prints matching draft entries.
-- `shell` — spawned with the prompt on **stdin**, for a command-line agent. This
-  is how GLM joins: it runs from PowerShell, which the bus can start.
+- `shell` — spawned with the prompt on **stdin**, for a command-line agent.
 
 **The hub can only run what the file declares.** The form sends an `id`, never a
 command. A text box that could hand a shell string to a worker on your machine

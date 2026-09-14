@@ -1464,11 +1464,12 @@ function callTool(name, args) {
 // had one local-model draft with four defects in it.
 
 const OLLAMA = process.env.OLLAMA_URL || "http://127.0.0.1:11434";
-// A RUNNER id, not a model name — findRunner() matches on id ("gpt-oss"), and
-// "gpt-oss:20b" missed, fell through to "first enabled runner", and `work`
-// silently ran whatever that was. The documented model only followed from the
-// default runners.json by coincidence.
-const DEFAULT_RUNNER = process.env.AGENT_BUS_RUNNER || "gpt-oss";
+// A RUNNER id, not a model name — findRunner() matches on id. A model name once
+// missed, fell through to "first enabled runner", and `work` silently ran
+// whatever that was. No id is built in: the bus ships no one's models, so the
+// default is the machine's — AGENT_BUS_RUNNER, else runners.json's "default",
+// else its first enabled runner.
+const DEFAULT_RUNNER = process.env.AGENT_BUS_RUNNER || null;
 
 function nextTaskId(state) {
   state.taskSeq = (state.taskSeq ?? 0) + 1;
@@ -1476,27 +1477,56 @@ function nextTaskId(state) {
 }
 
 /**
- * The runners the bus may invoke, from runners.json beside this file.
+ * The runners the bus may invoke, from runners.json beside this file, or the
+ * file AGENT_BUS_RUNNERS names (the harnesses point it at a fixture, so they
+ * never depend on this machine's list).
  *
- * Read fresh each time rather than cached: adding a model or filling in the GLM
- * command should take effect on the next task, not on the next restart of a
- * worker that has been up for hours.
+ * runners.json is the machine's own and git ignores it: a tracked list shipped
+ * one person's models to everyone who cloned the bus. runners.example.json is
+ * the tracked template.
+ *
+ * Read fresh each time rather than cached: adding a model should take effect
+ * on the next task, not on the next restart of a worker that has been up for
+ * hours.
+ *
+ * Returns {runners, preferred, problem}. There is no fallback runner: the bus
+ * has no model of its own to fall back to, and a guessed one would run a task
+ * somewhere nobody chose. A missing or broken file is named instead.
  */
-function readRunners() {
+function loadRunners() {
+  const file = process.env.AGENT_BUS_RUNNERS || new URL("./runners.json", import.meta.url);
+  const where = process.env.AGENT_BUS_RUNNERS || "runners.json beside server.mjs";
+  let raw;
   try {
-    const raw = fs.readFileSync(new URL("./runners.json", import.meta.url), "utf8");
-    const list = JSON.parse(raw).runners ?? [];
-    return list.filter((r) => r && r.id && r.type);
+    raw = fs.readFileSync(file, "utf8");
   } catch {
-    // No config, or broken JSON. Fall back to the one model this project is
-    // known to use, so a typo in the file cannot take the whole lane down.
-    return [{ id: "gpt-oss", label: "gpt-oss:20b — local", type: "ollama", model: "gpt-oss:20b", enabled: true }];
+    return {
+      runners: [],
+      preferred: null,
+      problem: `No ${where}. Copy runners.example.json to runners.json and fill in your models — \`server.mjs discover\` drafts entries for the servers on this machine.`,
+    };
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return {
+      runners: (parsed.runners ?? []).filter((r) => r && r.id && r.type),
+      preferred: typeof parsed.default === "string" ? parsed.default : null,
+      problem: null,
+    };
+  } catch (e) {
+    return { runners: [], preferred: null, problem: `${where} is not valid JSON: ${e.message}` };
   }
 }
 
+function readRunners() {
+  return loadRunners().runners;
+}
+
 function findRunner(id) {
-  const runners = readRunners();
-  const found = runners.find((r) => r.id === id) ?? runners.find((r) => r.enabled);
+  const { runners, preferred, problem } = loadRunners();
+  if (problem) throw new Error(problem);
+  const found =
+    runners.find((r) => r.id === id) ?? runners.find((r) => r.id === preferred) ?? runners.find((r) => r.enabled);
   if (!found) throw new Error("No enabled runner in runners.json.");
   if (!found.enabled) {
     throw new Error(
@@ -2318,7 +2348,7 @@ function runCli(argv) {
       // to the cloud judge. Only on the user's ask is the roadmap's hard gate.
       case "bench": {
         // Flags parsed positionally, and a flag's VALUE is consumed — a naive
-        // "drop everything starting with --" let the judge id ("glm") leak
+        // "drop everything starting with --" let the judge's id leak
         // into the runner ids, where it was then filtered out as the judge:
         // zero candidates, an empty bench, no error. This bug ran live.
         const ids = [];
