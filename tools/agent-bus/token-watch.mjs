@@ -303,6 +303,19 @@ export function baselineFrom(scans, opts = {}) {
  * turn the session ran after it — is the re-read it never paid. No counterfactual,
  * no rates, no estimate: drop × remaining turns, summed over every compaction.
  *
+ * But a claim's window ends at the NEXT compaction, not at the end of the
+ * session (problem/saved-counter-compaction-window, the user's report that
+ * ~35B saved cannot be real — it could not, and it was 51.6B measured). Once
+ * another compaction runs, the smaller context is the one being re-read, and
+ * the earlier drop stops growing; multiplying by all remaining turns gives
+ * every compaction credit for re-reads a later one actually absorbed, and one
+ * long, many-compaction session alone claimed 32.5B that no session could
+ * ever have spent — a session cannot hold its pre-compaction context past the
+ * context limit, so "compacted never" is not a counterfactual it could live.
+ * drop × turns until the next compaction (the last one keeps the tail) is the
+ * honest ceiling: generous while it was the only reset in sight, capped the
+ * moment the real data says another reset happened.
+ *
  * Compaction points come from the labelled transcript markers, or — for tools
  * that do not label them — the same double-gated curve-drop inference
  * measuredBaseline uses (both gates: a ratio test alone silently misses real
@@ -330,14 +343,19 @@ export function compactionSavings(scans) {
     const curve = scan?.curve || [];
     let sessionSaved = 0;
     let sessionEvents = 0;
-    for (const at of compactionPoints(scan)) {
+    const points = compactionPoints(scan);
+    for (let k = 0; k < points.length; k++) {
       // at is the first post-compaction turn; curve[at-1] is what the session
       // was about to keep re-reading. A compaction at the tail (no next turn
-      // yet) has no drop to count and none to claim.
+      // yet) has no drop to count and none to claim. The claim's window ends
+      // at the next compaction — after that, the re-read actually paid is the
+      // smaller context's, and the earlier drop has no more to give.
+      const at = points[k];
       if (at > 0 && at < curve.length) {
         const drop = curve[at - 1] - curve[at];
         if (drop > 0) {
-          sessionSaved += drop * (curve.length - at);
+          const until = k + 1 < points.length ? points[k + 1] : curve.length;
+          sessionSaved += drop * (until - at);
           sessionEvents++;
         }
       }

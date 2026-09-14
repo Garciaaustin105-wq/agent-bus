@@ -529,6 +529,22 @@ check("compactionSavings-infers-unlabelled-with-the-baseline-gates", () => {
   eq(r.events, 1, "one inferred event");
 });
 
+check("compactionSavings-a-later-compaction-caps-the-earlier-claim", () => {
+  // curve = [100500, 106200, 8100, 8350, 90000, 5000, 5100], compactions = [2, 5]
+  // (problem/saved-counter-compaction-window). Event 1's claim stops at the
+  // next compaction, not at the end of the session: drop 98100 x 3 turns
+  // (turns 2,3,4) = 294300. Event 2 keeps the tail: drop 85000 x 2 = 170000.
+  const t = [
+    turn(U(90000, 10000, 500)), turn(U(105000, 1000, 200)), MARK,
+    turn(U(5000, 3000, 100)), turn(U(8200, 100, 50)), turn(U(88000, 1500, 500)), MARK,
+    turn(U(4800, 150, 50)), turn(U(4900, 150, 50)),
+  ].join("\n");
+  const r = compactionSavings([scanTranscript(t)]);
+  eq(r.events, 2, "two events");
+  eq(r.total, 98100 * 3 + 85000 * 2, "first claim capped by the second compaction");
+  eq(r.per[0].tokens, 98100 * 3 + 85000 * 2, "per-session aligned");
+});
+
 check("compactionSavings-tail-marker-claims-nothing", () => {
   // Marker after the last turn: no post-compaction turn, no drop to count.
   const t = [turn(U(90000, 10000, 500)), turn(U(105000, 1000, 200)), MARK].join("\n");

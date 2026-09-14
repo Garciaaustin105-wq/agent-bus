@@ -918,9 +918,12 @@ function renderStatusHtml(state, opts = {}) {
 
   // THE SAVINGS HEADLINE is compaction (request/saved-counter-final-shape,
   // the user's decisive reframing). What compacting saved is exact: the
-  // context a session dropped, multiplied by every turn it ran after — the
-  // re-read it never paid. Aligned to tokens.rows so the per-session rows can
-  // carry their own numbers.
+  // context a session dropped, multiplied by the turns it ran before the next
+  // compaction — the re-read it never paid. The window, not the whole rest of
+  // the session: after the next compaction the smaller context is what is
+  // being re-read, and the earlier drop has no more to give
+  // (saved-counter-compaction-window). Aligned to tokens.rows so the
+  // per-session rows can carry their own numbers.
   const compaction = compactionSavings(
     tokens.missing || !tokens.totals ? [] : tokens.rows.map((r) => r.scan)
   );
@@ -1172,8 +1175,9 @@ ${costHtml}
 <div class="card">
   <div style="font-size:24px">saved by compacting: <b>${savedTotal.toLocaleString()} tokens</b></div>
   <div class="mut" style="padding-top:2px">over ${savedEvents} compaction${savedEvents === 1 ? "" : "s"}${bySpace && bySpace.length > 1 ? `, across ${bySpace.length} spaces` : ""} —
-    the context each session dropped, multiplied by every turn it ran after that.
-    Counted exactly from the transcripts; the drop is real, and so is the turn count.</div>
+    the context each session dropped, multiplied by the turns it ran until its
+    next compaction. Counted exactly from the transcripts; the drop is real,
+    and so is the turn count.</div>
   ${bySpaceHtml}
   ${
     liveSaved > 0
