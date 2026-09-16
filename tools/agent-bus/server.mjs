@@ -708,7 +708,7 @@ const TOOLS = [
 // most need them are the ones that have been here before.
 export const COST_RULES = [
   "COST RULES (docs/build-rules.md H16, J5, J6, K2) — every turn re-reads the whole conversation, so:",
-  "- Compact at 80-100k tokens of context, right after a commit. Never let a session grow toward the 1M window.",
+  "- Compact at 80-100k tokens of context, right after a commit. Enforce it: set autoCompactWindow to 100000 in local project settings (the floor; it fires at ~84k). Never let a session grow toward the 1M window.",
   "- Hand off a whole file's worth of work at once, never one small function. Code under ~30 lines you write yourself; checks first either way.",
   "- Queue a handoff with task_add and a role: quick for one ordinary file, deep for a long or tricky body. The bus fills each role from its own measured record and retries a miss once on the role's next runner; an empty answer is a limit first, so read done_reason.",
   "- Do the bus steps for a commit in one command: claim && commit; release.",

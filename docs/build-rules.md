@@ -679,6 +679,32 @@ grow with the number of compactions, so the real optimum is above where the
 table bottoms out. Past 80k the extra saving is 2%, for half again as many
 compactions.
 
+**Enforce it in settings, not in intent.** An agent cannot compact itself, so
+"compact at 80–100k" written as advice is ignored in practice: every compaction
+in the audit was automatic, at the window wall. The lever is Claude Code's
+`autoCompactWindow` setting (or `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, which wins).
+
+    // .claude/settings.local.json
+    { "autoCompactWindow": 100000 }
+
+Found by reading the Claude Code 2.1.271 bundle on 2026-09-16:
+- It accepts `"auto"` or **100k–1M** only. 80k and 35k cannot be set, and
+  100000 is the floor.
+- Auto-compaction fires at about **84% of the window**: 41 of 41 compactions in
+  one session fired at 167–172k against a 200k window. So a 100k window fires
+  at about **84k**, which is the table's best row.
+- `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` also exists, but the bundle reads it as
+  `testPctOverride`. It is a test hook, not a supported setting: do not build
+  on it.
+- A compaction now keeps the last 6–9 messages verbatim
+  (`compactMetadata.preservedMessages`), so a session resumes at 18–25k rather
+  than at the bare summary. At an 84k trigger that is still about 60k of new
+  work per cycle.
+
+**Incident:** 2026-09-16. The project had `autoCompactWindow: 200000`, so one
+session compacted 41 times at ~170k, about twice the context per turn this rule
+calls for, and the user caught it before any agent did.
+
 **Practical form:**
 - When context passes about 80–100k, finish the current step, commit, and
   compact.
