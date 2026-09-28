@@ -95,6 +95,49 @@ check("an unparseable lock is treated as dead only when stale", () => {
   assert.equal(r.status, 0, `garbage lock older than the stale window is broken: ${r.stderr}`);
 });
 
+// 2026-09-28: two idle `server.mjs work` processes died with an uncaught
+// "EPERM: operation not permitted, open '...\.lock'" at withState. On Windows,
+// opening a file that another process is in the middle of deleting fails with
+// EPERM (sometimes EACCES or EBUSY) instead of EEXIST, and withState rethrew
+// anything that was not EEXIST. It must wait and retry like EEXIST, and only
+// surface the real error once its attempt budget is spent.
+{
+  const { withState } = await import(new URL("./server.mjs", import.meta.url).href);
+  fs.rmSync(LOCK, { force: true });
+  const realOpen = fs.openSync;
+  const failWith = (code, times) => {
+    let left = times;
+    fs.openSync = (p, ...rest) => {
+      if (p === LOCK && left > 0) {
+        left--;
+        throw Object.assign(new Error(`${code}: operation not permitted, open '${p}'`), { code });
+      }
+      return realOpen(p, ...rest);
+    };
+    return () => left;
+  };
+  for (const code of ["EPERM", "EACCES", "EBUSY"]) {
+    check(`a transient ${code} on the lock open is waited out, not thrown`, () => {
+      const left = failWith(code, 3);
+      try {
+        const out = withState(() => "ran");
+        assert.equal(out, "ran", "the critical section ran once the lock opened");
+        assert.equal(left(), 0, "all three transient failures were retried through");
+      } finally {
+        fs.openSync = realOpen;
+      }
+    });
+  }
+  check("a PERSISTENT EPERM still surfaces once the attempt budget is spent", () => {
+    failWith("EPERM", Infinity);
+    try {
+      assert.throws(() => withState(() => "never"), /EPERM|state lock/);
+    } finally {
+      fs.openSync = realOpen;
+    }
+  });
+}
+
 sleeper.kill();
 fs.rmSync(HOME, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);

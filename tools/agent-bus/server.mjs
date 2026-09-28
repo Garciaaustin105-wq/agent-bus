@@ -198,6 +198,10 @@ function sleepMs(ms) {
 
 const LOCK_STALE_MS = 10_000;
 
+/** Lock-open errors that mean "someone else is mid-way through the lock file"
+ *  on Windows (a pending delete), not a real refusal -- see withState. */
+const TRANSIENT_LOCK_OPEN_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
+
 /**
  * Run `fn` against the state file while holding an exclusive lock.
  *
@@ -219,12 +223,24 @@ const LOCK_STALE_MS = 10_000;
 function withState(fn) {
   const token = `${process.pid}:${SESSION_KEY}`;
   let fd = null;
+  let lastTransient = null;
   for (let attempt = 0; attempt < 200; attempt++) {
     try {
       fd = fs.openSync(LOCK, "wx");
       fs.writeFileSync(fd, token);
       break;
     } catch (err) {
+      // On Windows, opening a file another process is in the middle of
+      // deleting (the previous holder's unlink) fails with EPERM -- sometimes
+      // EACCES or EBUSY -- instead of EEXIST. That is contention, not a real
+      // permission problem: wait and retry like EEXIST. Rethrowing it killed
+      // two idle `work` processes on 2026-09-28 (lock-harness.mjs pins it). A
+      // genuine permission problem still surfaces, once the budget is spent.
+      if (TRANSIENT_LOCK_OPEN_CODES.has(err.code)) {
+        lastTransient = err;
+        sleepMs(15);
+        continue;
+      }
       if (err.code !== "EEXIST") throw err;
       // A session that crashed holding the lock must not deadlock the others.
       // Mtime alone is not proof of death — a legitimately slow critical
@@ -248,7 +264,12 @@ function withState(fn) {
       sleepMs(15);
     }
   }
-  if (fd === null) throw new Error("agent-bus: could not acquire the state lock");
+  if (fd === null) {
+    throw new Error(
+      "agent-bus: could not acquire the state lock" +
+        (lastTransient ? ` (last open error: ${lastTransient.code} -- ${lastTransient.message})` : ""),
+    );
+  }
 
   try {
     let state;
