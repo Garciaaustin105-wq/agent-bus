@@ -216,6 +216,21 @@ a cheap ping now and then so the board keeps showing you.
 node tools/agent-bus/server.mjs ping   # one line: "I am here"
 ```
 
+**Handing off.** `note` captures facts, but nothing answered the moment the
+session that was driving a thread just ended: here is the whole state and
+where to resume. That transfer was once hand-rolled in the camera-platform
+bench thread as a standalone markdown file plus one pointer note, which the
+next agent only found by luck — the exact duplication `handoff` exists to
+close. It writes one keyed, self-superseding entry instead: a verified
+summary, the one next step, the open work in priority order, pointers and the
+standing constraints, with any earlier handoff under the same key archived to
+history. `handoff_take` resumes it on the record, appending to a `taken`
+chain, so two takers see each other rather than a lock that rots.
+
+```sh
+node tools/agent-bus/server.mjs handoff --summary "..." --next "..." --key handoff-camera
+```
+
 **Pointing at a different project.** A hub normally serves the repo it runs
 in. When you want this hub's bus to live in a *different* project root instead,
 `AGENT_BUS_PROJECT` names it — state is read from `<root>/.git/agent-bus` and
@@ -225,24 +240,25 @@ renders the same way. Both are unset here.
 ## Verifying
 
 ```sh
-node tools/agent-bus/e2e-agent-bus.mjs        # 70 — stdio end to end, temp dirs only
+node tools/agent-bus/e2e-agent-bus.mjs        # 72 — stdio end to end, temp dirs only
+node tools/agent-bus/handoff-harness.mjs      # 17 — handoff + handoff_take: supersede, history cap, taken chain
 node tools/agent-bus/agent-harness.mjs        # 33 — hub-agent dispatch rules
 node tools/agent-bus/edits-harness.mjs        # 32 — edit-protocol failure modes + the self-edit guard
 node tools/agent-bus/lessons-harness.mjs      # 23 — the cross-install learning seam
-node tools/agent-bus/token-watch-harness.mjs  # 46 — context-budget watch
+node tools/agent-bus/token-watch-harness.mjs  # 53 — context-budget watch
 node tools/agent-bus/discover-harness.mjs     # 11 — fleet discovery + the openai runner
 node tools/agent-bus/blockers-harness.mjs     # 24 — blocker matching + the fix-banking loop
-node tools/agent-bus/routing-harness.mjs      # 17 — runner routing from the fleet's own record
+node tools/agent-bus/routing-harness.mjs      # 30 — runner routing from the fleet's own record
 node tools/agent-bus/runner-limits-harness.mjs # 16 — per-runner budgets
 node tools/agent-bus/worker-tasks-harness.mjs # 12 — task queue state layer + state-growth caps
-node tools/agent-bus/hub-http-harness.mjs     # 29 — dashboard HTTP edge, one-hub rule, savings counter, app spaces, old-server cards
+node tools/agent-bus/hub-http-harness.mjs     # 31 — dashboard HTTP edge, one-hub rule, savings counter, app spaces, old-server cards
 node tools/agent-bus/projects-harness.mjs     # 14 — the app-space registry + cross-space reads + vendored-copy warning
 node tools/agent-bus/steward-harness.mjs      # 40 — the steward's four duties, against a fake classifier
 node tools/agent-bus/bench-harness.mjs        # 23 — the bench contract: never deletes, hardware-gated
-node tools/agent-bus/lock-harness.mjs         # 5  — state lock staleness and identity
+node tools/agent-bus/lock-harness.mjs         # 9  — state lock staleness and identity
 ```
 
-389 checks in total. All suites use temp dirs and never touch real state.
+440 checks in total. All suites use temp dirs and never touch real state.
 
 ## Learning across installs
 

@@ -487,6 +487,14 @@ const PAGE_CSS = `<style>
   table.tw tr.watch td:first-child { border-left:3px solid var(--mut); padding-left:6px; }
   .problem { background:var(--card); border:1px solid var(--line);
     border-left:3px solid var(--warn); border-radius:10px; padding:10px 14px; margin-bottom:6px; }
+  /* Handoff entries (spec handoff-verb.md): hot on the board like a held lock,
+    with a badge a status() skim cannot miss, plus the list styles the handoff
+    page reuses. */
+  details.handoff { border-left:3px solid var(--warn); }
+  .badge { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.06em;
+    color:var(--warn); border:1px solid var(--warn); border-radius:4px; padding:0 5px; flex:0 0 auto; }
+  .plainlist { margin:0; padding-left:18px; }
+  .plainlist li { margin:3px 0; overflow-wrap:anywhere; }
   a { color:var(--ok); }
 </style>`;
 
@@ -758,7 +766,18 @@ function renderStatusHtml(state, opts = {}) {
   // the rest — folded, not deleted: the state file keeps every note and
   // nothing anywhere removes one.
   const BOARD_HEAD = 12;
-  const boardRow = ([k, v]) => `<details><summary><b>${esc(k)}</b>
+  // A handoff board row renders hot (spec handoff-verb.md, Integration): the
+  // value still carries the rendered "HANDOFF (set …)" line, but the row is
+  // banded, badges HANDOFF and links to /handoff/<key>, where the whole
+  // structured state lives. Every row also gets a note-<key> anchor so the
+  // handoff page's busKey links land on the note they belong to.
+  const boardRow = ([k, v]) =>
+    v && v.kind === "handoff"
+      ? `<details class="handoff" id="note-${encodeURIComponent(k)}"><summary><span class="badge">handoff</span>
+      <b><a href="/handoff/${encodeURIComponent(k)}${projQ}" style="color:inherit;text-decoration:none">${esc(k)}</a></b>
+      <span class="mut">${esc(v.by)} · ${esc(ago(v.at))}</span></summary>
+      <p>${esc(v.value)}</p></details>`
+      : `<details id="note-${encodeURIComponent(k)}"><summary><b>${esc(k)}</b>
       <span class="mut">${esc(v.by)} · ${esc(ago(v.at))}</span></summary>
       <p>${esc(v.value)}</p></details>`;
   const boardArea = (title, rows, emptyNote) =>
@@ -773,6 +792,10 @@ function renderStatusHtml(state, opts = {}) {
   const boardGroups = [
     ["Problems", board.filter(([k]) => k.startsWith("problem/")), "No problems on the board."],
     ["Requests", board.filter(([k]) => k.startsWith("request/")), "Nothing requested yet."],
+    // kind:"handoff" entries get their own area rather than drowning in
+    // General — a live handoff is exactly what a person reopening this window
+    // mid-session-change needs to see first.
+    ["Handoffs", board.filter(([, v]) => v && v.kind === "handoff"), "No handoff on the board — one is written when a session ends mid-task."],
     ["Status", board.filter(([k]) => k.startsWith("status/")), "No status notes."],
   ];
   const grouped = new Set(boardGroups.flatMap(([, rows]) => rows.map(([k]) => k)));
@@ -1592,6 +1615,165 @@ ${
   })();
 }
 
+/* ── the handoff page ─────────────────────────────────────────────────────── */
+
+// One page per board handoff (spec handoff-verb.md, Integration), routed like
+// the task pages: /handoff/<key>. The board row shows only the rendered
+// "HANDOFF (set …)" line; this page shows the whole structured state behind it
+// — summary, next step, the prioritised open list, pointers, constraints, the
+// taken chain, and the superseded history.
+//
+// READ-ONLY ON PURPOSE (spec non-goals): a handoff is a statement of state,
+// not a queue item, so the page offers no form, notifies nobody and injects
+// nothing anywhere — resuming it is handoff_take's act, on the record. That
+// also means the page needs no `back` plumbing: nothing posts from here.
+//
+// The active entry lives at state.board[<key>] with kind "handoff"; history
+// lives at state.handoffs[<key>] (newest first, last 5). ?h=<index> opens one
+// history entry as the main view; with no active entry and only history,
+// /handoff/<key> falls back to the newest history entry rather than 404ing —
+// the page that answers "where did this thread go" beats a dead link.
+function handoffPageHtml(key, flash, proj, hIdx = null) {
+  return (() => {
+    const state = stateFor(proj);
+    const projQ = proj && !proj.own ? `?p=${encodeURIComponent(proj.name)}` : "";
+    const esc = (v) =>
+      String(v ?? "").replace(/[&<>"']/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]
+      );
+    pruneAgents(state);
+    const ago = (iso) => {
+      if (!iso) return "";
+      const s = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
+      if (s < 60) return `${s}s ago`;
+      if (s < 3600) return `${Math.round(s / 60)}m ago`;
+      return `${Math.round(s / 3600)}h ago`;
+    };
+
+    const active = state.board?.[key];
+    const activeHandoff = active && active.kind === "handoff" ? active : null;
+    // A state written before the verb existed has no handoffs map at all — that
+    // reads as "no history", not as an error.
+    const history = Array.isArray(state.handoffs?.[key]) ? state.handoffs[key] : [];
+    const picked =
+      hIdx !== null && Number.isInteger(hIdx) && history[hIdx] ? history[hIdx] : null;
+    const entry = picked ?? activeHandoff ?? history[0] ?? null;
+    if (!entry) return null;
+    const viewLink = (i) =>
+      `/handoff/${encodeURIComponent(key)}${projQ ? projQ + "&" : "?"}h=${i}`;
+
+    // The structured body of ONE handoff entry — reused verbatim for the
+    // active entry and each history entry. Every field is text another
+    // process wrote and is escaped on the way out, like everything else here.
+    const handoffBody = (h) => {
+      const open = Array.isArray(h.open) ? h.open : [];
+      const pointers = Array.isArray(h.pointers) ? h.pointers : [];
+      const constraints = Array.isArray(h.constraints) ? h.constraints : [];
+      const taken = Array.isArray(h.taken) ? h.taken : [];
+      // A busKey is a note key, so its link is the board anchor for that note
+      // (boardRow stamps every row with a note-<key> id) — priorities and the
+      // problems they belong to stay linked, without a page per note.
+      const busLink = (k) =>
+        `<a href="/${projQ}#note-${encodeURIComponent(String(k))}">${esc(k)}</a>`;
+      return `
+  <h2>Next step</h2>
+  <div class="flash" style="margin:0">${esc(h.nextStep ?? "")}</div>
+
+  <h2>State of the world — summary</h2>
+  <div class="card"><p class="msgtext">${esc(h.summary ?? "")}</p></div>
+
+  <h2>Open work (${open.length}) — priority order, first is first done</h2>
+  ${
+    open.length
+      ? `<div class="card"><table class="tw">${open
+          .map(
+            (o, i) => `<tr><td class="num" style="white-space:nowrap">${i + 1}.</td>
+        <td><b>${esc(o?.title ?? "")}</b>${o?.detail ? `<p class="mut">${esc(o.detail)}</p>` : ""}
+        ${o?.busKey ? `<p class="mut">board note: ${busLink(o.busKey)}</p>` : ""}</td></tr>`
+          )
+          .join("")}</table></div>`
+      : `<p class="mut">None recorded — the open list is optional; the next step carries the priority.</p>`
+  }
+
+  <h2>Pointers (${pointers.length})</h2>
+  ${
+    pointers.length
+      ? `<div class="card"><pre>${esc(pointers.join("\n"))}</pre>
+      <p class="mut">Paths, doc names, commit SHAs — what a claimant reads before touching code.</p></div>`
+      : `<p class="mut">None.</p>`
+  }
+
+  <h2>Constraints (${constraints.length})</h2>
+  ${
+    constraints.length
+      ? `<div class="card"><ul class="plainlist">${constraints
+          .map((c) => `<li>${esc(c)}</li>`)
+          .join("")}</ul></div>`
+      : `<p class="mut">None — no standing rules inherited with this state.</p>`
+  }
+
+  <h2>Taken chain (${taken.length})</h2>
+  ${
+    taken.length
+      ? `<div class="card"><table class="tw">
+      <tr><th>resumed by</th><th>when</th></tr>
+      ${taken
+        .map(
+          (t) => `<tr><td><b>${esc(t?.by ?? "?")}</b></td>
+        <td class="num">${esc(t?.at ?? "")}${t?.at ? ` <span class="mutcell">(${esc(ago(t.at))})</span>` : ""}</td></tr>`
+        )
+        .join("")}</table>
+      <p class="mut">Taking is an act, not a wake — the chain is the record, and two names
+        on it means coordinate on the bus before you start.</p></div>`
+      : `<p class="mut">Nobody has taken it yet. The state waits for whoever chooses to resume it.</p>`
+  }`;
+    };
+
+    const superseded = entry.supersededAt || entry.supersededBy;
+    return `<!doctype html>
+<meta charset="utf-8"><title>Agent Bus — ${esc(key)}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+${REFRESH_META(Date.now())}${REFRESH_JS}
+${PAGE_CSS}
+
+<div class="head">
+  <h1><span class="badge">handoff</span> ${esc(key)}</h1>
+  <span class="mut">set by ${esc(entry.by ?? "?")} · ${esc(entry.at ?? "")}${entry.at ? ` (${esc(ago(entry.at))})` : ""}</span>
+</div>
+<p class="mut"><a href="/${projQ}">← back to the board</a></p>
+${flash ? `<div class="flash">${esc(flash)}</div>` : ""}
+
+${
+  superseded
+    ? `<div class="problem"><b>superseded — this is history, not the active handoff</b>
+    <p class="msgtext">Replaced${entry.supersededBy ? ` by ${esc(entry.supersededBy)}` : ""}${entry.supersededAt ? ` at ${esc(entry.supersededAt)}` : ""}.
+      The handoff live now, if one exists, is on the board under this key.</p></div>`
+    : `<div class="flash">The active handoff under this key — a statement of state, not work in the queue.
+      Nothing here notifies anyone; resuming it is <code>handoff_take</code>'s act, on the record.</div>`
+}
+${handoffBody(entry)}
+
+<h2>The rendered board entry</h2>
+<div class="card"><pre>${esc(entry.value ?? "")}</pre></div>
+
+<h2>History (${history.length})</h2>
+${
+  history.length
+    ? history
+        .map((h, i) => {
+          const isMain = entry === h;
+          return `<details class="handoff"${isMain ? " open" : ""}>
+      <summary><b>#${history.length - i}</b>
+        <span class="mut">set by ${esc(h.by ?? "?")} · ${esc(h.at ?? "")} · superseded ${esc(h.supersededAt ?? "")}${h.supersededBy ? ` by ${esc(h.supersededBy)}` : ""}</span>
+        <a href="${esc(viewLink(i))}">view</a></summary>
+      ${handoffBody(h)}</details>`;
+        })
+        .join("")
+    : `<p class="mut">No superseded handoffs under this key yet — the first rewrite archives one here.</p>`
+}`;
+  })();
+}
+
 /* ── this machine ─────────────────────────────────────────────────────────── */
 
 // What the hub is running on, read from the system rather than assumed. CPU
@@ -1928,6 +2110,29 @@ function runDashboard(port) {
             res.writeHead(404, { "content-type": "text/html; charset=utf-8" });
             res.end(
               `${PAGE_CSS}<p class="mut" style="padding:26px 30px">No task by that id on this bus. <a href="/${proj.own ? "" : `?p=${encodeURIComponent(proj.name)}`}">← back to the board</a></p>`
+            );
+          } else {
+            res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+            res.end(html);
+          }
+          return;
+        }
+        // A dedicated page per board handoff: /handoff/<key> (spec
+        // handoff-verb.md, Integration) — the whole structured state behind the
+        // board row's HANDOFF line. ?h=<index> opens a history entry. Read-only.
+        const handoffMatch = url.pathname.match(/^\/handoff\/([^/]+)$/);
+        if (handoffMatch) {
+          const hRaw = url.searchParams.get("h");
+          const html = handoffPageHtml(
+            decodeURIComponent(handoffMatch[1]),
+            url.searchParams.get("flash"),
+            proj,
+            hRaw === null ? null : Number(hRaw)
+          );
+          if (html === null) {
+            res.writeHead(404, { "content-type": "text/html; charset=utf-8" });
+            res.end(
+              `${PAGE_CSS}<p class="mut" style="padding:26px 30px">No handoff under that key on this bus. <a href="/${proj.own ? "" : `?p=${encodeURIComponent(proj.name)}`}">← back to the board</a></p>`
             );
           } else {
             res.writeHead(200, { "content-type": "text/html; charset=utf-8" });

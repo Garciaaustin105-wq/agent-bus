@@ -230,20 +230,22 @@ watch at another repo's transcripts.
 ## Tests
 
 ```
-node tools/agent-bus/e2e-agent-bus.mjs          65 assertions, two real processes
+node tools/agent-bus/e2e-agent-bus.mjs          72 assertions, two real processes
+node tools/agent-bus/handoff-harness.mjs        17 — handoff + handoff_take (supersede, history cap, taken chain)
 node tools/agent-bus/agent-harness.mjs          33 — the hub agent's matching and dispatch
-node tools/agent-bus/token-watch-harness.mjs    46 — the context arithmetic
-node tools/agent-bus/edits-harness.mjs          29 — the edit protocol
+node tools/agent-bus/steward-harness.mjs        40 — the steward's four duties, against a fake classifier
+node tools/agent-bus/token-watch-harness.mjs    53 — the context arithmetic
+node tools/agent-bus/edits-harness.mjs          32 — the edit protocol
 node tools/agent-bus/lessons-harness.mjs        23 — the cross-install learning seam
 node tools/agent-bus/discover-harness.mjs       11 — fleet discovery + the openai runner
 node tools/agent-bus/blockers-harness.mjs       24 — blocker matching + the fix-banking loop
-node tools/agent-bus/routing-harness.mjs        17 — runner routing from the fleet's own record
+node tools/agent-bus/routing-harness.mjs        30 — runner routing from the fleet's own record
 node tools/agent-bus/runner-limits-harness.mjs  16 — per-runner output budgets
-node tools/agent-bus/worker-tasks-harness.mjs   10 — the task queue's state layer + state-growth caps
-node tools/agent-bus/hub-http-harness.mjs       18 — the dashboard's HTTP edge + app spaces + docs panels
-node tools/agent-bus/projects-harness.mjs       13 — the app-space registry + cross-space reads
-node tools/agent-bus/bench-harness.mjs          22 — the bench contract: never deletes, hardware-gated
-node tools/agent-bus/lock-harness.mjs           5  — the state lock's staleness and identity
+node tools/agent-bus/worker-tasks-harness.mjs   12 — the task queue's state layer + state-growth caps
+node tools/agent-bus/hub-http-harness.mjs       31 — the dashboard's HTTP edge + app spaces + docs panels
+node tools/agent-bus/projects-harness.mjs       14 — the app-space registry + cross-space reads
+node tools/agent-bus/bench-harness.mjs          23 — the bench contract: never deletes, hardware-gated
+node tools/agent-bus/lock-harness.mjs           9  — the state lock's staleness and identity
 ```
 
 The e2e spawns **two real server processes** and races them for the

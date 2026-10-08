@@ -396,6 +396,70 @@ const cap = (s, n) => {
   return text.length > n ? text.slice(0, n) + `\n[truncated at ${n} chars]` : text;
 };
 
+// --- the `handoff` verb's rendering + list-shape helpers (module scope so
+// --- they are hoisted above the switch that uses them; a const between two
+// --- cases would sit in its TDZ when control jumps straight to the case).
+const renderHandoff = (entry) => {
+  const firstLine = (s) => String(s ?? "").split("\n")[0];
+  const lines = [`HANDOFF (set ${entry.setAt} by ${entry.by}, next: ${firstLine(entry.nextStep)})`];
+  lines.push("", "STATE OF THE WORLD", entry.summary);
+  if (entry.nextStep !== firstLine(entry.nextStep)) {
+    lines.push("", "NEXT STEP", entry.nextStep);
+  }
+  if (entry.open.length) {
+    lines.push("", `OPEN (${entry.open.length}; priority order, first is first done)`);
+    entry.open.forEach((o, i) => {
+      lines.push(`${i + 1}. ${o.title}`);
+      if (o.detail) lines.push(`   ${o.detail}`);
+      if (o.busKey) lines.push(`   belongs to board key: ${o.busKey}`);
+    });
+  }
+  if (entry.pointers.length) {
+    lines.push("", "POINTERS", ...entry.pointers.map((p) => `  - ${p}`));
+  }
+  if (entry.constraints.length) {
+    lines.push("", "CONSTRAINTS (inherited — they outlived the last session too)", ...entry.constraints.map((c) => `  - ${c}`));
+  }
+  if (entry.taken.length) {
+    lines.push("", `TAKEN (${entry.taken.length}) — chain of custody; coordinating on the bus is yours, not the bus's job:`);
+    entry.taken.forEach((t) => lines.push(`  ${t.by} at ${t.at}`));
+  }
+  return lines.join("\n");
+};
+const handoffKeyOf = (args) => {
+  const key = String(args?.key || "handoff").trim() || "handoff";
+  return assertKey(key);
+};
+// List fields accept the loose shapes a hurried writer actually sends: plain
+// strings become {title} items or pointer lines. An absent field is an empty
+// list — that is normal (most handoffs have no constraints) — but an unusable
+// list is refused rather than silently dropped, because a constraint that
+// vanished on write is worse than one that was never written.
+const handoffOpenItems = (raw) => {
+  if (raw == null) return [];
+  if (!Array.isArray(raw)) throw new Error("`open` must be an array of {title, detail?, busKey?} or strings.");
+  return raw
+    .map((item) => {
+      if (typeof item === "string") return { title: cap(item.trim(), MAX_NOTE_CHARS) };
+      const title = cap(String(item?.title ?? "").trim(), MAX_NOTE_CHARS);
+      if (!title) return null;
+      const out = { title };
+      const detail = String(item?.detail ?? "").trim();
+      if (detail) out.detail = cap(detail, MAX_NOTE_CHARS);
+      const busKey = String(item?.busKey ?? "").trim();
+      if (busKey) out.busKey = assertKey(busKey, "busKey");
+      return out;
+    })
+    .filter((item) => item !== null);
+};
+const handoffLines = (raw, what) => {
+  if (raw == null) return [];
+  if (!Array.isArray(raw)) throw new Error(`\`${what}\` must be an array of strings.`);
+  return raw
+    .map((line) => cap(String(line).trim(), MAX_NOTE_CHARS))
+    .filter((line) => line !== "");
+};
+
 /** Can the OS still see this process? `kill(pid, 0)` sends no signal — it only
  *  asks whether that pid exists, and works on Windows and POSIX alike; EPERM
  *  means it exists but belongs to another user — still alive. This is the same
@@ -566,6 +630,34 @@ const TOOLS = [
         caught: { type: "string", description: "How it surfaced — which check, which failure. Optional." },
       },
       required: ["claimed", "truth"],
+    },
+  },
+  {
+    name: "handoff",
+    description:
+      "Write or supersede this project's ACTIVE handoff: the whole state of a session that is ending — what is true, the ONE thing to do first, the open work in priority order, the pointers the next agent must read, and the standing constraints it inherits. The next agent must be able to resume from the bus alone, without your transcript, without you alive to ask. Writing again under the same key replaces the active one (the old one is kept in history). A handoff is a statement of state — it never enters the task queue.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        summary: { type: "string", description: "The state of the world, verified. Written for someone who was not here. No narrative." },
+        nextStep: { type: "string", description: "The ONE thing to do first. No single first thing? Prioritize the open list first — do not post a handoff without a next step." },
+        open: { type: "array", description: "Open work, priority order (first item = first done). Each item: {title, detail?, busKey?} — detail is enough to start without the old session; busKey is the board note this work belongs to, so priorities and problems stay linked.", items: { type: "object" } },
+        pointers: { type: "array", description: "Repo-relative or absolute paths, doc names, commit SHAs — what a claimant must read before touching code.", items: { type: "string" } },
+        constraints: { type: "array", description: "Standing rules that outlive the session: 'target is linux', 'do not push without the user'.", items: { type: "string" } },
+        key: { type: "string", description: "Default 'handoff'. Use a suffix per scope sharing one bus, e.g. 'handoff-camera'." },
+      },
+      required: ["summary", "nextStep"],
+    },
+  },
+  {
+    name: "handoff_take",
+    description:
+      "Resume this project's ACTIVE handoff, on the record: returns all of it verbatim and stamps you on its taken chain. A handoff nobody took is a rumor — the chain is the custody. Two agents may both take one; both names show on the chain and each sees the other, so coordinate on the bus before you start. Taking locks nothing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        key: { type: "string", description: "Default 'handoff'. The same key the writer used." },
+      },
     },
   },
   {
@@ -987,6 +1079,100 @@ function callTool(name, args) {
       });
     }
 
+    // The bus is problem-shaped, not session-shaped — and that gap shows at
+    // the END of a session, not the start. `note` captures facts, `miss`
+    // captures corrections, `task_add` queues work, but nothing answered
+    // "the conversation that was driving this just ended; here is the whole
+    // state and where to resume." That knowledge either died with the session
+    // or got re-invented per handoff as an out-of-band markdown file the next
+    // agent only found by luck (the camera bench thread, 2026-09-14).
+    //
+    // The pairing mirrors `miss`: the write and the taking are different acts
+    // by different agents, and a handoff nobody took is a rumor — the taken
+    // chain is what turns "someone left state" into "someone resumed it".
+    // renderHandoff/handoffKeyOf/handoffOpenItems/handoffLines live at module
+    // scope (function declarations above the switch are hoisted); a const
+    // between two cases would sit in its TDZ whenever control jumps straight
+    // to one of these labels.
+    case "handoff": {
+      const summary = cap(String(args.summary || "").trim(), MAX_NOTE_CHARS);
+      const nextStep = cap(String(args.nextStep || "").trim(), MAX_NOTE_CHARS);
+      if (!summary || !nextStep) {
+        throw new Error(
+          "A handoff needs a `summary` (the verified state of the world) and a `nextStep` " +
+          "(the ONE thing to do first) — without a next step this is a rumor, not a handoff."
+        );
+      }
+      const key = handoffKeyOf(args);
+      const at = nowIso();
+      const entry = {
+        kind: "handoff",
+        key,
+        summary,
+        nextStep,
+        open: handoffOpenItems(args.open),
+        pointers: handoffLines(args.pointers, "pointers"),
+        constraints: handoffLines(args.constraints, "constraints"),
+        // `at` is the board's canonical field (status() sorts on it — a
+        // handoff without it sorts as NaN and its skim line reads "unknown
+        // ago"); `setAt` is the shape the hub page and the spec render from.
+        // Same moment, two names, because the board schema is older.
+        setAt: at,
+        at,
+        by: null,
+        taken: [],
+        value: null,
+      };
+      return withState((state) => {
+        entry.by = requireName();
+        touch(state);
+        state.handoffs ||= {}; // states written before the verb have no history yet
+        const prior = state.board[key];
+        if (prior) {
+          const history = state.handoffs[key] || [];
+          history.unshift({ ...structuredClone(prior), supersededAt: nowIso(), supersededBy: entry.by });
+          state.handoffs[key] = history.slice(0, 5);
+        }
+        // Cap the whole rendered entry at 4x a note: a handoff that cannot fit
+        // that is four notes plus a pointer, not an error.
+        entry.value = cap(renderHandoff(entry), MAX_NOTE_CHARS * 4);
+        state.board[key] = entry;
+        return prior
+          ? `Replaced the handoff by ${prior.by} set at ${prior.at} — it is in history (entry 1). An agent overwriting an active handoff is doing something significant; ${entry.by === prior.by ? "yours was the one replaced." : "coordinate on the bus before superseding someone else's."}`
+          : `Handoff posted under "${key}". handoff_take resumes it, on the record.`;
+      });
+    }
+    case "handoff_take": {
+      const key = handoffKeyOf(args);
+      return withState((state) => {
+        const me = requireName();
+        touch(state);
+        const entry = state.board[key];
+        if (!entry || entry.kind !== "handoff") {
+          const hist = (state.handoffs || {})[key];
+          const newest = hist && hist.length ? hist[0] : null;
+          throw new Error(
+            newest
+              ? `Nothing active under "${key}". The last one was set by ${newest.by} at ${newest.at} — that thread exists in history, and resuming it is your act: post a new handoff (or a note) once you know the state.`
+              : `Nothing active under "${key}".`
+          );
+        }
+        const at = nowIso();
+        entry.taken.push({ by: me, at });
+        entry.value = cap(renderHandoff(entry), MAX_NOTE_CHARS * 4);
+        // Taking does NOT lock anything — two agents may both take one, and
+        // the chain is the audit trail. Each taker sees the others in the
+        // response: the feared failure is answered by the chain being
+        // impossible to miss, not by a mutex that rots.
+        const others = entry.taken.slice(0, -1);
+        const lines = [entry.value, "", `Taken by ${me} at ${at}.`];
+        for (const o of others) {
+          lines.push(`Also taken by ${o.by} at ${o.at} — coordinate on the bus before you start.`);
+        }
+        return lines.join("\n");
+      });
+    }
+
     // §5's second half, in three verbs. capable() is the ask-at-startup — the
     // hub cannot match a blocker to a solver it never heard about. block() is
     // the stuck agent's report; the bus does the matching, the messaging and
@@ -1263,8 +1449,12 @@ function callTool(name, args) {
         if (!board.length) lines.push("  empty");
         for (const [k, v] of board) {
           // Keys and authors only. The values are paragraphs; `board` prints
-          // those in full and this is meant to fit on one screen.
-          lines.push(`  ${k} — ${v.by}, ${ago(v.at)}`);
+          // those in full and this is meant to fit on one screen. A live
+          // handoff is the one thing worth a marker here: a session ending
+          // mid-task is invisible in keys-and-authors, and a resume that
+          // never happens was what the verb exists to prevent.
+          const marker = v.kind === "handoff" ? " · HANDOFF" : "";
+          lines.push(`  ${k} — ${v.by}, ${ago(v.at)}${marker}`);
         }
         if (board.length) lines.push("", "  full text: node server.mjs board");
         // Blockers get their own section, not board keys: an OPEN block is not
@@ -2235,6 +2425,47 @@ function runCli(argv) {
         const [claimed, truth, ...c] = rest;
         myName = process.env.AGENT_BUS_NAME || "cli";
         return say(callTool("miss", { claimed, truth, caught: c.join(" ") }));
+      }
+      // The end of a session, from a shell. The --open/--pointers/--constraints
+      // arrays read a JSON array from a file — one flag per read beats a giant
+      // inline JSON blob typed on a shell line, and an unknown flag is refused
+      // rather than ignored, because a constraint that silently vanished would
+      // be the worst possible way for this verb to fail.
+      case "handoff": {
+        const opt = {};
+        for (let i = 0; i < rest0.length; i++) {
+          const flag = rest0[i];
+          const valueFlag = flag === "--summary" || flag === "--next" || flag === "--key";
+          const fileFlag = flag === "--open" || flag === "--pointers" || flag === "--constraints";
+          if (!valueFlag && !fileFlag) {
+            throw new Error(
+              `Unknown flag "${flag}". The flags: --summary, --next, --key (values); ` +
+              "--open, --pointers, --constraints (each reads a JSON array from a file)."
+            );
+          }
+          opt[flag.slice(2)] = fileFlag
+            ? JSON.parse(fs.readFileSync(rest0[++i], "utf8"))
+            : rest0[++i];
+        }
+        myName = process.env.AGENT_BUS_NAME || "cli";
+        registerCli(myName);
+        return say(callTool("handoff", {
+          summary: opt.summary,
+          nextStep: opt.next,
+          key: opt.key,
+          open: opt.open,
+          pointers: opt.pointers,
+          constraints: opt.constraints,
+        }));
+      }
+      // The resuming act, from a shell — same refusal as MCP when there is
+      // nothing active; the taken chain answers "who has been here".
+      case "handoff-take": {
+        const idx = rest0.indexOf("--key");
+        const key = idx >= 0 ? rest0[idx + 1] : undefined;
+        myName = process.env.AGENT_BUS_NAME || "cli";
+        registerCli(myName);
+        return say(callTool("handoff_take", { key }));
       }
       // The spine's Review stage from a shell — same verdict, same refusals.
       case "review": {
