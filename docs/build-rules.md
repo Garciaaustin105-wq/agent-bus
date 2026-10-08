@@ -648,71 +648,38 @@ steer the work — a rule exists, a function is called that, a number was
 measured — and it predates a compaction, verify it. It costs one tool call.
 The wrong version costs whatever gets built on top of it.
 
-### H16. Compact at 80–100k, after a commit. Never let a session grow toward the 1M window.
+### H16. Do not force compaction. Cost is set by what enters context, not by when you cut it.
 
-H13 says an auto-compaction pays for itself. This rule is about *when*.
-Re-reading is 98% of tokens (H1), so what a session costs is set by how big
-its context gets before it is cut.
+**Superseded 2026-09-20.** The earlier form of this rule - compact at 80-100k
+right after a commit, enforced with `autoCompactWindow: 100000` - no longer
+applies. Claude Code now summarizes a long conversation on its own and carries
+the summary, plus whatever is still unsummarized, into the next window, so a
+session continues mid-task. An agent that stops early, hands off, or steers to
+stay under a threshold now pays for a handoff it did not need and drops work in
+progress. Do not set `autoCompactWindow`, and do not read a rising context as a
+reason to wrap up.
 
-**Incident:** measured 2026-09-14 over one project's 18 session transcripts
-(10,589 turns, deduped by message id). Two sessions ran on a 1M-token window and
-never compacted. They averaged 548k and 516k tokens of context per turn, and
-were **77% of everything the 18 sessions spent**. Capped by auto-compaction
-(about 170k), the same work would have cost roughly 70% less. Sessions that did
-auto-compact averaged 123k per turn.
-
-Replaying the same work, with the same new tokens and output per turn, compacted
-at a threshold T instead of at auto (~170k):
-
-    compact at   spend vs auto   compactions
-      130k           -11%           1.4x
-      100k           -18%           1.9x
-       80k           -23%           2.5x
-       60k           -25%           3.6x
-
-Weights: output 5, input 1, cache read 0.1, cache write 1.25. Each compaction
-is charged at ~110 s and a ~4.5k-token summary.
-
-**Why not 60k:** the replay does not charge for re-reading files after a
-compaction (H14), or for the wall clock and misplaced certainty (H13). Those
-grow with the number of compactions, so the real optimum is above where the
-table bottoms out. Past 80k the extra saving is 2%, for half again as many
-compactions.
-
-**Enforce it in settings, not in intent.** An agent cannot compact itself, so
-"compact at 80–100k" written as advice is ignored in practice: every compaction
-in the audit was automatic, at the window wall. The lever is Claude Code's
-`autoCompactWindow` setting (or `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, which wins).
-
-    // .claude/settings.local.json
-    { "autoCompactWindow": 100000 }
-
-Found by reading the Claude Code 2.1.271 bundle on 2026-09-16:
-- It accepts `"auto"` or **100k–1M** only. 80k and 35k cannot be set, and
-  100000 is the floor.
-- Auto-compaction fires at about **84% of the window**: 41 of 41 compactions in
-  one session fired at 167–172k against a 200k window. So a 100k window fires
-  at about **84k**, which is the table's best row.
-- `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` also exists, but the bundle reads it as
-  `testPctOverride`. It is a test hook, not a supported setting: do not build
-  on it.
-- A compaction now keeps the last 6–9 messages verbatim
-  (`compactMetadata.preservedMessages`), so a session resumes at 18–25k rather
-  than at the bare summary. At an 84k trigger that is still about 60k of new
-  work per cycle.
-
-**Incident:** 2026-09-16. The project had `autoCompactWindow: 200000`, so one
-session compacted 41 times at ~170k, about twice the context per turn this rule
-calls for, and the user caught it before any agent did.
+**The finding survives; the mechanism does not.** Re-reading is still most of
+what a session spends (H1). The lever is now what *enters* context in the first
+place, not when the context is cut.
 
 **Practical form:**
-- When context passes about 80–100k, finish the current step, commit, and
-  compact.
-- Before compacting, put what the next turn needs on the board or in a file
-  (H14).
-- After it, verify the load-bearing claim (H15).
-- A session on a 1M window gets the same threshold. The bigger window is room
-  for one large read, not permission to stop compacting.
+- Never re-read a file you have already read this session, and never re-derive a
+  fact already established in the conversation.
+- Send bulk reading - sweeping many files to answer one question - to a
+  subagent, and keep its conclusion rather than the file dumps.
+- Put what the next turn needs on the board or in a file anyway (H14). A summary
+  is lossy by design, and the board outlives the session.
+- Verify a load-bearing claim that predates a summary (H15).
+
+**History, kept because the numbers were real.** Measured 2026-09-14 over one
+project's 18 session transcripts (10,589 turns, deduped by message id): two
+sessions ran on a 1M-token window and never compacted, averaged 548k and 516k
+tokens of context per turn, and were 77% of everything those 18 sessions spent.
+Sessions that did auto-compact averaged 123k per turn. That is why this rule
+existed. It was written when compaction was something an agent had to provoke.
+It is automatic now, and the 2026-09-16 incident it cited - a project left on
+`autoCompactWindow: 200000` - cannot recur through a setting nobody sets.
 
 ---
 
