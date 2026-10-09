@@ -2,7 +2,7 @@
 
 Researched against live docs 2026-10-08; corrects the 2026-10-09 folder draft
 item 3 and an earlier "gated behind packaging" verdict — **Smithery is already
-unblocked**: `smithery.yaml` at the repo root (commit `ee1ff14`/`ee1ff24`,
+unblocked**: `smithery.yaml` at the repo root (commit `ee1ff24`,
 2026-10-10) declares the stdio startCommand and was stdio-probed 25 tools
 (now 28 after recall-and-care).
 
