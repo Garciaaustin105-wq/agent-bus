@@ -30,7 +30,7 @@ import {
   withState,
   asActor,
   callTool,
-  docsDir,
+  packageDocsDir,
   describeLock,
   pruneAgents,
   registerCli,
@@ -289,7 +289,7 @@ export function dispatch(text, index, state) {
 function fixIndex() {
   let rules = [];
   try {
-    rules = parseRulebook(fs.readFileSync(docsDir() + "/build-rules.md", "utf8"));
+    rules = parseRulebook(fs.readFileSync(packageDocsDir() + "/build-rules.md", "utf8"));
   } catch {
     /* no rulebook where the seam says it lives — the board alone still works */
   }

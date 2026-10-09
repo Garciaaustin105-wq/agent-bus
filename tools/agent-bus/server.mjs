@@ -32,9 +32,11 @@
 // needs and knows nothing else about it.
 
 import fs from "node:fs";
+import net from "node:net";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { cutoffWhy, ollamaOptions } from "./runner-limits.mjs";
@@ -80,7 +82,20 @@ import {
   writeRegistry,
 } from "./projects.mjs";
 
-const VERSION = "1.0.0";
+// Version from package.json when it sits two levels up (the repo / the
+// npm-installed package both have it there); the fallback keeps a bare-clone
+// edge working and matches the release this code last shipped. One number,
+// one source: a harness pin asserts the two never disagree.
+const PKG = (() => {
+  try {
+    return JSON.parse(
+      fs.readFileSync(path.resolve(import.meta.dirname, "..", "..", "package.json"), "utf8")
+    );
+  } catch {
+    return null;
+  }
+})();
+const VERSION = (PKG && PKG.version) || "0.1.5";
 const PROTOCOL = "2024-11-05";
 
 /* ── where state lives ────────────────────────────────────────────────────── */
@@ -152,14 +167,23 @@ function readStateForRoot(root) {
   }
 }
 
-// Where the hub reads build-rules.md / how-we-work.md. Defaults to the
-// project root's docs/ — today's layout. After the docs move to the hub's own
-// repo, AGENT_BUS_PROJECT will still point the bus at the shared checkout, so
-// AGENT_BUS_DOCS_DIR is what names the docs' new home from outside it.
-function docsDir() {
+// Docs resolution is TWO things, and one function used to serve both (the
+// split is packaging.md item 5):
+//   - packageDocsDir() — the hub's own learning: the rulebook, how-we-work,
+//     the workflow spine. These ship WITH the code, wherever it is installed,
+//     so they resolve from the CODE home — path traversal from this file to
+//     <package>/docs. AGENT_BUS_DOCS_DIR still names an alternatives home
+//     from outside the code.
+//   - projectDocsDir() — the served project's own docs. No consumer needs
+//     this yet; it exists so the day one arrives, "whose docs?" is already
+//     settled rather than re-fought. PROJECT_ROOT, never the package.
+function packageDocsDir() {
   return process.env.AGENT_BUS_DOCS_DIR
     ? path.resolve(process.env.AGENT_BUS_DOCS_DIR)
-    : path.join(PROJECT_ROOT, "docs");
+    : path.resolve(import.meta.dirname, "..", "..", "docs");
+}
+function projectDocsDir() {
+  return path.join(PROJECT_ROOT, "docs");
 }
 
 /* ── the workflow spine, as data ──────────────────────────────────────────── */
@@ -174,7 +198,7 @@ const SPINE_STAGES = [
 ];
 function readStages() {
   try {
-    const raw = fs.readFileSync(path.join(docsDir(), "workflow-spine.md"), "utf8");
+    const raw = fs.readFileSync(path.join(packageDocsDir(), "workflow-spine.md"), "utf8");
     const names = [...raw.matchAll(/^##\s+\d+\.\s+(.+?)\s+—/gm)].map((m) => m[1].trim().toLowerCase());
     return names.length === SPINE_STAGES.length ? names : SPINE_STAGES;
   } catch {
@@ -2637,6 +2661,93 @@ function runCli(argv) {
           child.on("exit", (code) => { process.exitCode = code ?? 0; });
           return;
         }
+      case "open": {
+        // packaging.md item 3, as a verb: the port is chosen by BINDING to 0
+        // and reading .address().port — the .cmd's netstat grep is retired,
+        // not ported. Then: start the hub (its own one-hub rule handles
+        // "already running") but only open the window once the port actually
+        // ANSWERS — a window pointed at a hub that has not bound yet lands
+        // on the browser's own error page, where our auto-refresh is not,
+        // so it would never recover (the lesson the .cmd's :wait loop
+        // already paid for).
+        const fixed = rest0.length ? Number(rest0[0]) : NaN;
+        const hubPath = path.join(import.meta.dirname, "hub.mjs");
+        const url = (p) => `http://127.0.0.1:${p}`;
+        // One HTTP GET with a retry budget. No dependency: http from node.
+        const waitUp = (port, budgetMs, cb) => {
+          const start = Date.now();
+          const tryOnce = () => {
+            const req = http.get({ host: "127.0.0.1", port, path: "/" }, (res) => {
+              res.resume();
+              cb(true);
+            });
+            req.on("error", () => {
+              if (Date.now() - start > budgetMs) return cb(false);
+              setTimeout(tryOnce, 500);
+            });
+          };
+          tryOnce();
+        };
+        const startHub = (port) => {
+          const child = spawn(
+            process.execPath,
+            [hubPath, String(port)],
+            { stdio: "inherit" }
+          );
+          child.on("exit", (code) => { process.exitCode = code ?? 0; });
+          waitUp(port, 15000, (up) => {
+            if (!up) {
+              say(`hub did not answer on ${url(port)} within 15s — see its output above`);
+              return;
+            }
+            openAppWindow(say, url(port));
+          });
+        };
+        if (Number.isInteger(fixed) && fixed > 0 && fixed <= 65535) startHub(fixed);
+        else {
+          // Packaging.md: bind to 0, read the port, not a netstat grep.
+          const probe = net.createServer();
+          probe.listen(0, "127.0.0.1", () => {
+            const free = probe.address().port;
+            probe.close(() => startHub(free));
+          });
+        }
+        return;
+      }
+      case "init": {
+        // packaging.md item 5, as a verb. Registers the resolved project in
+        // its .mcp.json — creating or MERGING (never clobbering another
+        // server's entry, never overwriting an existing agent-bus entry),
+        // atomically, printing exactly what it wrote. A filesystem op only:
+        // no bus state is touched, so nothing here announces to the board.
+        const projIdx = rest0.indexOf("--project");
+        const flagRoot = projIdx >= 0 && rest0[projIdx + 1] ? path.resolve(rest0[projIdx + 1]) : null;
+        const root = flagRoot ?? projectRoot();
+        const file = path.join(root, ".mcp.json");
+        let cfg = {};
+        try {
+          if (fs.existsSync(file)) cfg = JSON.parse(fs.readFileSync(file, "utf8"));
+        } catch {
+          throw new Error(
+            `${file} is not valid JSON — refusing to merge; fix or move it first`
+          );
+        }
+        if (!cfg || typeof cfg !== "object") cfg = {};
+        cfg.mcpServers = cfg.mcpServers && typeof cfg.mcpServers === "object" ? cfg.mcpServers : {};
+        if (cfg.mcpServers["agent-bus"]) {
+          say(`${file} already registers agent-bus:`);
+          say(JSON.stringify(cfg.mcpServers["agent-bus"], null, 2));
+          return;
+        }
+        cfg.mcpServers["agent-bus"] = { command: "agent-bus", args: ["mcp"] };
+        const tmp = file + ".init-tmp";
+        if (fs.existsSync(file)) fs.copyFileSync(file, file + ".init-bak");
+        fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2) + "\n");
+        fs.renameSync(tmp, file);
+        say(`wrote ${file}:`);
+        say(JSON.stringify({ mcpServers: { "agent-bus": cfg.mcpServers["agent-bus"] } }, null, 2));
+        return;
+      }
       case "note": {
         const [key, ...v] = rest;
         myName = process.env.AGENT_BUS_NAME || "cli";
@@ -2864,35 +2975,99 @@ function runCli(argv) {
           .finally(() => setTimeout(() => process.exit(process.exitCode ?? 0), 50));
         return;
       }
+      case "mcp": {
+        // packaging.md item 3: the no-argument behavior, named — one
+        // implementation, this same function.
+        startServerStdio();
+        return;
+      }
       default:
-        say("agent-bus — usage:");
-        say("  dashboard [port] | work [lane] [runner] | task <lane> <title> <prompt>");
-        say("  tasks | runners | status | board | agents | note <key> <value> | send <to> <msg>");
-        say("  cost [--full]   where the tokens actually went");
-        say("  inbox <name> | claim <name> <path> <reason> | release <name>");
-        say("  capable <cap> [more] | block <what> <needed> | unblock <id> <how>");
-        say("                      declare grants / report a blocker / bank the fix");
-        say("  share <board-key>   draft a lesson from a note, for a human to submit");
-        say("  lessons             read lessons published by other installs (untrusted)");
-        say("  discover            probe this machine for local model servers (drafts runners.json entries)");
-        say("  bench [id ...] [--judge <id>] [--ask]");
-        say("                      run the enabled local runners against fixed prompts; only on your ask");
-        say("  review <task-id> <approve|changes> [notes]");
-        say("                      stamp a review verdict on a finished draft");
-        say("  apply <task-id> [notes]");
-        say("                      turn a DRAFT brief into queued work (the dispatch)");
-        say("  publish <version> <what...>");
-        say("                      record that a build shipped");
-        say("  projects | project_add <name> <root> | project_remove <name>");
-        say("                      the app spaces this bus serves (hub Spaces bar)");
-        say("");
-        say("Set AGENT_BUS_NAME to avoid passing your name each time.");
+        printHelp(say);
         process.exitCode = 1;
     }
   } catch (err) {
     process.stderr.write(String(err.message || err) + "\n");
     process.exitCode = 1;
   }
+}
+
+// The verb list, one line each — the single copy (the default case and the
+// bare-TTY invocation both render it; the READMEs carry prose, not a second
+// table to drift).
+function printHelp(say) {
+  say("agent-bus — usage:");
+  say("  dashboard [port] | work [lane] [runner] | task <lane> <title> <prompt>");
+  say("  tasks | runners | status | board | agents | note <key> <value> | send <to> <msg>");
+  say("  cost [--full]   where the tokens actually went");
+  say("  inbox <name> | claim <name> <path> <reason> | release <name>");
+  say("  capable <cap> [more] | block <what> <needed> | unblock <id> <how>");
+  say("                      declare grants / report a blocker / bank the fix");
+  say("  share <board-key>   draft a lesson from a note, for a human to submit");
+  say("  lessons             read lessons published by other installs (untrusted)");
+  say("  discover            probe this machine for local model servers (drafts runners.json entries)");
+  say("  bench [id ...] [--judge <id>] [--ask]");
+  say("                      run the enabled local runners against fixed prompts; only on your ask");
+  say("  review <task-id> <approve|changes> [notes]");
+  say("                      stamp a review verdict on a finished draft");
+  say("  apply <task-id> [notes]");
+  say("                      turn a DRAFT brief into queued work (the dispatch)");
+  say("  publish <version> <what...>");
+  say("                      record that a build shipped");
+  say("  projects | project_add <name> <root> | project_remove <name>");
+  say("                      the app spaces this bus serves (hub Spaces bar)");
+  say("  open [port]         the dashboard, plus its own chromeless window");
+  say("  init [--project <root>]");
+  say("                      register the project in its .mcp.json (merge, never clobber)");
+  say("  mcp                 force the stdio MCP server (the no-argument behavior, named)");
+  say("");
+  say("Set AGENT_BUS_NAME to avoid passing your name each time.");
+}
+
+// The window is sugar, not the product (packaging.md item 2): with no
+// chrome-family browser we degrade to printing the URL in whatever the
+// default browser opener is, and the dashboard itself is unaffected either
+// way. Chrome/Edge because Safari and Firefox have no --app=.
+function openAppWindow(say, url) {
+  const pf = process.env["ProgramFiles"] || "";
+  const pf86 = process.env["ProgramFiles(x86)"] || "";
+  const chromeCandidates =
+    process.platform === "win32"
+      ? [
+          path.join(pf, "Google", "Chrome", "Application", "chrome.exe"),
+          path.join(pf86, "Google", "Chrome", "Application", "chrome.exe"),
+          path.join(pf, "Microsoft", "Edge", "Application", "msedge.exe"),
+          path.join(pf86, "Microsoft", "Edge", "Application", "msedge.exe"),
+        ]
+      : process.platform === "darwin"
+        ? ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+        : ["google-chrome", "chromium", "chromium-browser"];
+  const found =
+    process.platform === "linux"
+      ? // PATH candidates: probing with --version is the portable existence
+        // check (fs.existsSync does not resolve bare names on PATH).
+        chromeCandidates.find((c) => {
+          try {
+            return !spawnSync(c, ["--version"], { stdio: "ignore" }).error;
+          } catch {
+            return false;
+          }
+        })
+      : chromeCandidates.find((p) => p && fs.existsSync(p));
+  if (found) {
+    say(`opening ${url} in ${process.platform === "linux" ? found : path.basename(found)}`);
+    spawn(found, [`--app=${url}`, "--window-size=480,780"], {
+      detached: true,
+      stdio: "ignore",
+    }).unref();
+    return;
+  }
+  // No chrome family: the platform's default-opener, still detached.
+  say(`no app-mode browser found — opening ${url} in the default browser`);
+  spawn(
+    process.platform === "win32" ? "cmd" : process.platform === "darwin" ? "open" : "xdg-open",
+    process.platform === "win32" ? ["/c", "start", "", url] : [url],
+    { detached: true, stdio: "ignore" }
+  ).unref();
 }
 
 // A CLI invocation is a fresh process every time, so it re-announces itself
@@ -2931,7 +3106,9 @@ function registerCli(name) {
 export {
   DIR,
   PROJECT_ROOT,
-  docsDir,
+  packageDocsDir,
+  projectDocsDir,
+  packageDocsDir as docsDir, // deprecated alias — the hub's learning, not project docs
   agentRunning,
   asActor,
   askRunner,
@@ -2961,10 +3138,11 @@ if (IS_MAIN && process.argv.length > 2) {
   IS_CLI = true;
   runCli(process.argv.slice(2));
   // Every verb here is one-shot and exits — except `dashboard`, which waits on
-  // its child process, `work`, which loops, and `lessons`, whose fetch settles
+  // its child process, `open` (same child, plus a window), `mcp` (the stdio
+  // server itself), `work`, which loops, and `lessons`, whose fetch settles
   // async and exits itself. Exiting on any of those would tear it down before
   // the first result, so they opt out and Node stays alive.
-  if (!["dashboard", "work", "lessons", "discover", "bench"].includes(process.argv[2])) {
+  if (!["dashboard", "open", "mcp", "work", "lessons", "discover", "bench"].includes(process.argv[2])) {
     process.exit(process.exitCode ?? 0);
   }
 }
@@ -3022,10 +3200,10 @@ function handle(req) {
   }
 }
 
-// The stdio loop and the exit handlers below run only when this file IS the
-// entrypoint (an MCP session spawns it with no arguments). An import — hub.mjs
-// is the only one — must not touch stdin or install process handlers here.
-if (IS_MAIN && process.argv.length <= 2) {
+// The stdio loop and the exit handlers run only when this file IS the
+// entrypoint, via startServerStdio. An import — hub.mjs is the only one —
+// must not touch stdin or install process handlers here.
+function startServerStdio() {
   let buffer = "";
   process.stdin.setEncoding("utf8");
   process.stdin.on("data", (chunk) => {
@@ -3060,4 +3238,16 @@ if (IS_MAIN && process.argv.length <= 2) {
   process.on("SIGINT", () => { releaseOnExit(); process.exit(0); });
   process.on("SIGTERM", () => { releaseOnExit(); process.exit(0); });
   process.stdin.on("end", () => { releaseOnExit(); process.exit(0); });
+}
+
+// BARE INVOCATION RULE (packaging.md item 3): an MCP client spawns this
+// binary with piped (non-TTY) stdin — start the stdio server, unchanged. A
+// human who types it in a terminal has a TTY, and used to see the binary
+// "hang" on a quiet stdin; show them the verb list instead.
+if (IS_MAIN && process.argv.length <= 2) {
+  if (process.stdin.isTTY) {
+    printHelp((t) => process.stdout.write(t + "\n"));
+    process.exit(0);
+  }
+  startServerStdio();
 }

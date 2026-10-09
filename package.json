@@ -1,0 +1,27 @@
+{
+  "name": "agent-bus",
+  "version": "0.1.5",
+  "description": "A standalone command hub for coordinating AI agents — across different models and providers — as they work together.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Garciaaustin105-wq/agent-bus.git"
+  },
+  "bin": {
+    "agent-bus": "tools/agent-bus/server.mjs"
+  },
+  "files": [
+    "tools/agent-bus",
+    "docs",
+    "lessons/README.md",
+    "README.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node tools/agent-bus/e2e-agent-bus.mjs && node tools/agent-bus/agent-harness.mjs && node tools/agent-bus/steward-harness.mjs && node tools/agent-bus/token-watch-harness.mjs && node tools/agent-bus/edits-harness.mjs && node tools/agent-bus/lessons-harness.mjs && node tools/agent-bus/discover-harness.mjs && node tools/agent-bus/blockers-harness.mjs && node tools/agent-bus/routing-harness.mjs && node tools/agent-bus/runner-limits-harness.mjs && node tools/agent-bus/worker-tasks-harness.mjs && node tools/agent-bus/hub-http-harness.mjs && node tools/agent-bus/projects-harness.mjs && node tools/agent-bus/bench-harness.mjs && node tools/agent-bus/lock-harness.mjs && node tools/agent-bus/recall-harness.mjs && node tools/agent-bus/handoff-harness.mjs && node tools/agent-bus/npm-pack-harness.mjs"
+  }
+}

@@ -247,6 +247,7 @@ node tools/agent-bus/projects-harness.mjs       14 — the app-space registry + 
 node tools/agent-bus/bench-harness.mjs          23 — the bench contract: never deletes, hardware-gated
 node tools/agent-bus/lock-harness.mjs           9  — the state lock's staleness and identity
 node tools/agent-bus/recall-harness.mjs         46 — note history + history()/search + the health contract + depends_on + the caretaker, routes to owners
+node tools/agent-bus/npm-pack-harness.mjs        9  — the npm package contract (zero deps, bin shebang, version parity, pack→install→state lands in the project; skipped with a reason where npm is absent)
 ```
 
 The e2e spawns **two real server processes** and races them for the

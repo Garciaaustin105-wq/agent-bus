@@ -27,7 +27,7 @@ import { pathToFileURL } from "node:url";
 import {
   DIR,
   PROJECT_ROOT,
-  docsDir,
+  packageDocsDir,
   agentRunning,
   askRunner,
   asActor,
@@ -253,12 +253,12 @@ function refreshPage(force = false) {
  * NOT copied into this file. The rules change as incidents happen — they are up
  * to 26 and were 12 — and a hub showing a stale copy of the rules would be
  * exactly the failure the rules exist to prevent. Where they live is
- * docsDir()'s answer (the project root's docs/ unless AGENT_BUS_DOCS_DIR
+ * packageDocsDir()'s answer (the package code home's docs/ unless AGENT_BUS_DOCS_DIR
  * says otherwise).
  */
 function readBuildRules() {
   try {
-    const md = fs.readFileSync(path.join(docsDir(), "build-rules.md"), "utf8");
+    const md = fs.readFileSync(path.join(packageDocsDir(), "build-rules.md"), "utf8");
     const groups = [];
     let current = null;
     for (const raw of md.split("\n")) {
@@ -290,7 +290,7 @@ function readBuildRules() {
  */
 function readWorkflow() {
   try {
-    const md = fs.readFileSync(path.join(docsDir(), "how-we-work.md"), "utf8");
+    const md = fs.readFileSync(path.join(packageDocsDir(), "how-we-work.md"), "utf8");
     const groups = [];
     let current = null;
     for (const raw of md.split("\n")) {
@@ -322,7 +322,7 @@ function readWorkflow() {
  */
 function readSpine() {
   try {
-    const md = fs.readFileSync(path.join(docsDir(), "workflow-spine.md"), "utf8");
+    const md = fs.readFileSync(path.join(packageDocsDir(), "workflow-spine.md"), "utf8");
     const stages = [];
     let current = null;
     for (const raw of md.split("\n")) {
@@ -2586,7 +2586,7 @@ function runDashboard(port) {
         }
         let rulebook = null;
         try {
-          rulebook = fs.readFileSync(path.join(docsDir(), "build-rules.md"), "utf8");
+          rulebook = fs.readFileSync(path.join(packageDocsDir(), "build-rules.md"), "utf8");
         } catch {
           /* no rulebook yet — proposals are still fine, nothing to collide with */
         }

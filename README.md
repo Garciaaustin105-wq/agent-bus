@@ -257,9 +257,10 @@ node tools/agent-bus/steward-harness.mjs      # 40 — the steward's four duties
 node tools/agent-bus/bench-harness.mjs        # 23 — the bench contract: never deletes, hardware-gated
 node tools/agent-bus/lock-harness.mjs         # 9  — state lock staleness and identity
 node tools/agent-bus/recall-harness.mjs       # 46 — note history + history()/search, the health contract, depends_on, the caretaker, routes to the owner
+node tools/agent-bus/npm-pack-harness.mjs     # 9  — the npm package contract: zero deps, bin shebang, version parity, pack→install→state-lands-in-the-project (skipped with a reason where npm is absent)
 ```
 
-487 checks in total. All suites use temp dirs and never touch real state.
+496 checks in total. All suites use temp dirs and never touch real state.
 
 ## Learning across installs
 
