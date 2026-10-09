@@ -19,6 +19,7 @@
 // One poll, out: node tools/agent-bus/agent.mjs --once   (the e2e uses this)
 // Config:        HUB_AGENT_NAME (default "hub"), HUB_AGENT_POLL_MS (default 5000),
 //                HUB_AGENT_WATCH_MS (default 300000, 0 disables the token watch)
+//                HUB_AGENT_CARETAKER_MS (default on; "0" disables the caretaker)
 //                — the same AGENT_BUS_PROJECT / AGENT_BUS_DOCS_DIR seams the
 //                bus itself uses; importing server.mjs inherits them.
 
@@ -36,6 +37,7 @@ import {
 } from "./server.mjs";
 import { LIVE_MS, readSessions } from "./sessions.mjs";
 import { dueForNudge } from "./token-watch.mjs";
+import { checkHealth } from "./health.mjs";
 
 const NAME = process.env.HUB_AGENT_NAME || "hub";
 const POLL_MS = Math.max(500, Number(process.env.HUB_AGENT_POLL_MS) || 5000);
@@ -343,6 +345,128 @@ export function noteExpensiveSessions(log) {
   });
 }
 
+/* ── the caretaker ──────────────────────────────────────────────────────────
+ *
+ * §6 docs/recall-and-care: the hub agent checks its space every poll (the
+ * shared health contract) and files NEW findings on the board ITSELF, under
+ * caretaker-<kind>-<subject> keys, by its own name. This is the difference
+ * between a bus you must go look at and a bus that tells you it is decaying:
+ * every check in the contract answers a question somebody had to remember to
+ * ask — the caretaker is what asks it when nobody does.
+ *
+ * The rules it inherits from the expensive-session watch, and holds strictly:
+ *  - It files and stops (C4). It does not retry the task, release the claim,
+ *    close the block or take the handoff. The finding sits where whoever
+ *    owns it will trip over it.
+ *  - The board, not a message (F2): a message lives inside the very session
+ *    that may be gone; a board note survives it.
+ *  - Dedupe on kind+subject (the finding's subject is a stable id — task id,
+ *    board key, block id), detection timestamp preserved in the note.
+ *    Re-filing every poll is a note nobody reads.
+ *  - A finding that persists is re-filed at most daily, so it keeps its
+ *    place near the top of the time-sorted board without flooding it.
+ *  - A finding that clears is filed as CLEARED under the same key — a
+ *    caretaker that never says "this resolved itself" leaves a board of
+ *    stale alarms, and the resolution stays readable via history().
+ *  - §6 routing: a finding WITH an owner (a stale runner's session, an
+ *    untaken handoff's author) is sent to that owner's inbox the moment it
+ *    is filed — the person is not the mailman. Ownerless findings (dead
+ *    lanes, the human review gate) rely on the note alone.
+ *
+ * HUB_AGENT_CARETAKER_MS=0 disables it (a deterministic e2e run wants that);
+ * any other value is ignored — filing is event-driven, the poll just checks.
+ */
+const CARETAKER_RENUDGE_MS = 24 * 60 * 60 * 1000;
+const CARETAKER_ON = process.env.HUB_AGENT_CARETAKER_MS !== "0";
+
+const caretakerKey = (kind, subject) =>
+  "caretaker-" +
+  `${kind}-${subject}`
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+
+/**
+ * Routing — the user's directive, 2026-10-08: the bus works with the AGENTS,
+ * not for the person. A finding with an owner goes to the owner's inbox
+ * (send-shaped, delivered on their next bus read) at the same moment it is
+ * filed; the board note stays as the durable record, and only ownerless
+ * findings (a dead queue, the human's own review gate, an unmatchable block)
+ * rely on the note alone. Ownership is knowable where the finding names its
+ * subject, and ONLY routed when the owner is currently registered — a
+ * message to a pruned name would sit unread forever, and a note the owner
+ * might see later beats an inbox nobody will open.
+ */
+const caretakerOwnerOf = (finding, state) => {
+  if (finding.kind === "stale-runner") {
+    const task = (state.tasks ?? []).find((t) => t.id === finding.subject);
+    return task?.runner && state.agents[task.runner] ? task.runner : null;
+  }
+  if (finding.kind === "untaken-handoff") {
+    const entry = (state.board ?? {})[finding.subject];
+    return entry?.by && state.agents[entry.by] ? entry.by : null;
+  }
+  return null;
+};
+
+export function runCaretaker(log) {
+  if (!CARETAKER_ON) return;
+  const now = new Date();
+  const nowIso = now.toISOString();
+  withState((state) => {
+    const seen = (state.caretakerSeen ||= {}); // key -> {detectedAt, filedAt}
+    const findings = checkHealth(state, { now: now.getTime() });
+    const live = new Set();
+
+    for (const f of findings) {
+      const key = caretakerKey(f.kind, f.subject);
+      live.add(key);
+      const prior = seen[key];
+      const first = prior?.detectedAt ?? nowIso;
+      if (prior && now - Date.parse(prior.filedAt) < CARETAKER_RENUDGE_MS) continue;
+      seen[key] = { detectedAt: first, filedAt: nowIso };
+      const recurred = prior != null;
+      state.board[key] = {
+        value:
+          `${recurred ? "STILL " : ""}${f.detail} (first seen ${first}; ` +
+          `re-filed daily while it holds) — filed by the caretaker. Act or ignore; nothing here auto-applies.`,
+        by: NAME,
+        at: nowIso,
+      };
+      log.push(`caretaker filed ${key}${recurred ? " (re-nudge)" : ""}`);
+      // §6 routing: the poke goes to the owner, once per file (the daily
+      // re-nudge re-pokes too — still cheaper than a message every poll,
+      // and a standing problem SHOULD keep saying so).
+      const owner = caretakerOwnerOf(f, state);
+      if (owner && owner !== NAME && state.agents[owner]) {
+        (state.messages ||= []).push({
+          id: randomUUID(),
+          from: NAME,
+          to: owner,
+          text: `CARETAKER — ${f.detail} The board note under ${key} carries the record. Act or ignore; the person is not your mailman.`,
+          at: nowIso,
+          readBy: [],
+        });
+        log.push(`caretaker routed ${key} to ${owner}`);
+      }
+    }
+
+    for (const key of Object.keys(seen)) {
+      if (live.has(key)) continue;
+      const { detectedAt } = seen[key];
+      delete seen[key];
+      state.board[key] = {
+        value:
+          `Cleared — the finding first seen ${detectedAt} no longer holds. ` +
+          `This note is the resolution record; history("${key}") carries the stack.`,
+        by: NAME,
+        at: nowIso,
+      };
+      log.push(`caretaker filed ${key} (cleared)`);
+    }
+  });
+}
+
 /** One poll cycle. Returns a log string; the loop and --once both call it. */
 export function pollOnce() {
   const log = [];
@@ -416,6 +540,13 @@ export function pollOnce() {
       }
     }
   });
+
+  // The caretaker runs its health contract every poll — it is cheap (pure
+  // arithmetic over state already in hand) and event-driven by construction:
+  // it only writes when something became true, went clear, or fell a day old.
+  // Before the expensive-session watch, because that is advice ABOUT
+  // conversations while this is traffic on the bus itself.
+  runCaretaker(log);
 
   // Last, because it is advice about the conversation rather than traffic in
   // it: everything above answers somebody, this only measures.

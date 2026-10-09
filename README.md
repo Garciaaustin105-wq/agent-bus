@@ -256,9 +256,10 @@ node tools/agent-bus/projects-harness.mjs     # 14 — the app-space registry + 
 node tools/agent-bus/steward-harness.mjs      # 40 — the steward's four duties, against a fake classifier
 node tools/agent-bus/bench-harness.mjs        # 23 — the bench contract: never deletes, hardware-gated
 node tools/agent-bus/lock-harness.mjs         # 9  — state lock staleness and identity
+node tools/agent-bus/recall-harness.mjs       # 46 — note history + history()/search, the health contract, depends_on, the caretaker, routes to the owner
 ```
 
-440 checks in total. All suites use temp dirs and never touch real state.
+486 checks in total. All suites use temp dirs and never touch real state.
 
 ## Learning across installs
 

@@ -50,7 +50,12 @@ import {
   runStewardReviewTick,
   runStewardBriefTick,
   runStewardPromotionTick,
+  askBus,
 } from "./steward.mjs";
+// The bus's own decay contract (spec recall-and-care.md §4): pure module, so a
+// static import is safe here — the hub renders it per request, the caretaker
+// files it per poll, and neither touches disk through this file.
+import { checkHealth, renderHealth } from "./health.mjs";
 
 const STATE = path.join(DIR, "state.json");
 // Lives beside the state, not in the repo tree: it is generated, per-machine,
@@ -106,6 +111,18 @@ function healthOf(state) {
     last,
   };
 }
+
+// Task dependencies (spec recall-and-care.md §5), mirrored from server.mjs's
+// unmetDeps — which is deliberately not exported, so the render side restates
+// it. The rule must agree with the claim side on exactly one point or the page
+// would call a task blocked that a worker would cheerfully take: a dep
+// unlocks only when done, and a dep gone from the queue counts as done (the
+// prune only ever drops finished tasks, so a missing dep was a met one).
+const unmetDepsOf = (state, task) =>
+  (task.depends_on ?? []).filter((id) => {
+    const dep = (state.tasks ?? []).find((t) => t.id === id);
+    return dep != null && dep.status !== "done";
+  });
 
 const agoStr = (iso) => {
   if (!iso) return "";
@@ -441,6 +458,8 @@ const PAGE_CSS = `<style>
   .grid2 { display:grid; gap:10px; grid-template-columns:repeat(auto-fill,minmax(290px,1fr)); }
   .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
   .card.quiet { opacity:.5; }
+  .card.healthquiet { opacity:.55; }
+  .card.healthquiet .dot { background:var(--mut); }
   .row { display:flex; align-items:center; gap:7px; }
   .dot { width:7px; height:7px; border-radius:50%; background:var(--ok); flex:0 0 auto; }
   .quiet .dot { background:var(--mut); }
@@ -493,6 +512,9 @@ const PAGE_CSS = `<style>
   details.handoff { border-left:3px solid var(--warn); }
   .badge { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.06em;
     color:var(--warn); border:1px solid var(--warn); border-radius:4px; padding:0 5px; flex:0 0 auto; }
+  /* Health findings and blocked deps reuse the badge; the history link is a
+     small affordance that must not compete with the row's title. */
+  .hlink { font-size:11px; font-weight:400; padding-left:6px; }
   .plainlist { margin:0; padding-left:18px; }
   .plainlist li { margin:3px 0; overflow-wrap:anywhere; }
   a { color:var(--ok); }
@@ -771,14 +793,30 @@ function renderStatusHtml(state, opts = {}) {
   // banded, badges HANDOFF and links to /handoff/<key>, where the whole
   // structured state lives. Every row also gets a note-<key> anchor so the
   // handoff page's busKey links land on the note they belong to.
+  //
+  // HISTORY LINKS (spec recall-and-care.md §1–2): a key with kept history
+  // gets a small link to it — handoffs open their own page (which already
+  // renders the stack), note keys open the read-only /history/<key> page.
+  // The link is conditional: a key with no history anywhere must never offer
+  // a link into an empty answer.
+  const handoffHist = (k) => (Array.isArray(state.handoffs?.[k]) ? state.handoffs[k] : []);
+  const noteHist = (k) => (Array.isArray(state.archive?.[k]) ? state.archive[k] : []);
+  const histLink = (k, projQp = projQ) =>
+    handoffHist(k).length
+      ? `<a class="hlink" href="/handoff/${encodeURIComponent(k)}${projQp}">history</a>`
+      : noteHist(k).length
+        ? `<a class="hlink" href="/history/${encodeURIComponent(k)}${projQp}">history</a>`
+        : "";
   const boardRow = ([k, v]) =>
     v && v.kind === "handoff"
       ? `<details class="handoff" id="note-${encodeURIComponent(k)}"><summary><span class="badge">handoff</span>
       <b><a href="/handoff/${encodeURIComponent(k)}${projQ}" style="color:inherit;text-decoration:none">${esc(k)}</a></b>
-      <span class="mut">${esc(v.by)} · ${esc(ago(v.at))}</span></summary>
+      <span class="mut">${esc(v.by)} · ${esc(ago(v.at))}</span>${histLink(k)}
+      </summary>
       <p>${esc(v.value)}</p></details>`
       : `<details id="note-${encodeURIComponent(k)}"><summary><b>${esc(k)}</b>
-      <span class="mut">${esc(v.by)} · ${esc(ago(v.at))}</span></summary>
+      <span class="mut">${esc(v.by)} · ${esc(ago(v.at))}</span>${histLink(k)}
+      </summary>
       <p>${esc(v.value)}</p></details>`;
   const boardArea = (title, rows, emptyNote) =>
     rows.length
@@ -806,6 +844,16 @@ function renderStatusHtml(state, opts = {}) {
     ? tasks
         .map((t) => {
           const cls = t.status === "failed" ? " held" : "";
+          // Deps (spec recall-and-care.md §5): every dep names itself as
+          // "deps t1, t2"; while any of them sits unmet the task will never
+          // be claimed, so a badge says so and the waiting ids are listed
+          // rather than left to be worked out from the full dep line.
+          const depIds = t.depends_on ?? [];
+          const unmet = unmetDepsOf(state, t);
+          const depBadge = unmet.length
+            ? ` <span class="badge">blocked</span> <span class="mut">waiting on ${esc(unmet.join(", "))}</span>`
+            : "";
+          const depTag = depIds.length ? ` · deps ${esc(depIds.join(", "))}` : "";
           const body = t.result
             ? `<p class="mut" style="white-space:pre-wrap">${esc(t.result.slice(0, 1200))}</p>`
             : `<p class="mut">${esc((t.prompt || "").slice(0, 200))}</p>`;
@@ -823,8 +871,8 @@ function renderStatusHtml(state, opts = {}) {
             }
           }
           return `<details class="lock${cls}"><summary><b><a href="/task/${encodeURIComponent(t.id)}${projQ}" style="color:inherit;text-decoration:none">${esc(t.id)}</a></b>
-            <span>${esc(t.title || "")}</span>
-            <span class="mut">${esc(t.lane)}${t.stage ? ` · ${esc(t.stage)}` : ""} · ${status}${t.model ? " · " + esc(t.model) : ""}</span>
+            <span>${esc(t.title || "")}</span>${depBadge}
+            <span class="mut">${esc(t.lane)}${t.stage ? ` · ${esc(t.stage)}` : ""} · ${status}${depTag}${t.model ? " · " + esc(t.model) : ""}</span>
           </summary>${body}</details>`;
         })
         .join("")
@@ -1110,6 +1158,68 @@ function renderStatusHtml(state, opts = {}) {
 </div>`;
   }
 
+  // BUS HEALTH — the decay contract (spec recall-and-care.md §4) rendered for
+  // the person. checkHealth is the same run the `health` verb and the
+  // caretaker make; here every finding becomes one row — kind chip, detail
+  // verbatim — so the page shows the bus is rotting before a queued task has
+  // sat a day. A clean run keeps the verb's own line, counts and all: silence
+  // that says what it stayed silent ABOUT (never a bare "ok"). Read-only —
+  // filing findings is the caretaker's job, this panel only looks.
+  const busHealthHtml = (() => {
+    let findings = [];
+    let cleanLine = "";
+    try {
+      findings = checkHealth(state);
+      if (!findings.length) cleanLine = renderHealth(state);
+    } catch {
+      // health.mjs never reads disk, so a throw means a state shape nobody
+      // wrote — one decayed panel beats a 500 on the whole page.
+      return "<p class=\"mut\">health check unavailable for this state — nothing acted on it.</p>";
+    }
+    if (!findings.length) {
+      return `<div class="card healthquiet"><div class="row"><span class="dot"></span>
+        <span class="mut" style="margin:0">${esc(cleanLine)}</span></div></div>`;
+    }
+    return findings
+      .map(
+        (f) => `<div class="problem" style="padding:8px 12px">
+        <span class="badge">${esc(f.kind)}</span>
+        <span class="mut" style="margin-left:6px">${esc(f.subject ?? "")}</span>
+        <p class="msgtext">${esc(f.detail)}</p></div>`
+      )
+      .join("");
+  })();
+
+  // ASK THE BUS — duty 5 (steward.mjs::askBus). A small box, the steward's own
+  // runner answering from a bounded digest of THIS space's state, and the
+  // reply rendered underneath. Not interactive on the file:// snapshot (no
+  // POST exists there — the same rule the action forms keep).
+  const askBoxHtml = (() => {
+    if (!interactive) return "";
+    const { problem } = stewardRunnerOrProblem();
+    if (problem) {
+      return `<p class="mut">no runner available — add one in runners.json (then reopen this window) to ask the bus. ${esc(problem)}</p>`;
+    }
+    const la = lastAsk(opts.proj);
+    return `<form method="post" class="card" style="margin:0 0 6px">
+    <b>Ask the bus</b>
+    <p class="mut">One question, answered by the local runner the steward uses, from a bounded
+      snapshot of this space's state — no file contents ride in the prompt. A REPLY, not a filing:
+      nothing goes on the board, nothing is queued (C4).</p>
+    <input type="hidden" name="action" value="ask_bus">
+    <input name="question" required maxlength="2000" placeholder="e.g. what is stuck right now, and who can unstick it?">
+    <button>Ask</button>
+  </form>
+  ${
+    la
+      ? `<div class="msg"><b>${esc(la.q)}</b>
+      <span class="mut">answered by ${esc(la.by)}${la.at ? ` · ${esc(ago(la.at))}` : ""}</span>
+      <p class="msgtext">${esc(la.a)}</p>
+      <p class="mut">a reply, not a board note — nothing was filed, nothing queued.</p></div>`
+      : `<p class="mut">No reply yet — the bus answers here when you ask, and forgets on a restart (it remembers nothing you did not already see).</p>`
+  }`;
+  })();
+
   // Forms only exist in the served app. The written-to-disk copy is a file://
   // page with nothing to POST to, and a dead button is worse than no button.
   const actions = interactive
@@ -1188,6 +1298,11 @@ ${hardwareHtml()}`
     space's own: its project's transcripts and its local-model work.</p>
 </div>`
 }
+
+<h2>Bus health</h2>
+${busHealthHtml}
+${interactive ? `<h2>Ask the bus</h2>
+${askBoxHtml}` : ""}
 
 <h2>The context budget</h2>
 ${costHtml}
@@ -1540,6 +1655,29 @@ function taskPageHtml(id, flash, proj) {
     </form>`
         : "";
 
+    // Deps (spec recall-and-care.md §5), same rule the claim side uses —
+    // done unlocks, gone-from-queue counts as done, everything else blocks.
+    const taskDeps = task.depends_on ?? [];
+    const taskUnmet = unmetDepsOf(state, task);
+    const depsHtml = taskDeps.length
+      ? `<h2>Dependencies (${taskDeps.length})</h2>
+    <div class="card"><table class="tw">
+      ${taskDeps
+        .map((id) => {
+          const dep = (state.tasks ?? []).find((x) => x.id === id);
+          const depTask = dep ?? null;
+          const met = depTask == null ? "done (gone from the queue)" : depTask.status;
+          return `<tr><td><b><a href="/task/${encodeURIComponent(id)}${projQ}" style="color:inherit;text-decoration:none">${esc(id)}</a></b></td>
+          <td class="num${depTask && depTask.status !== "done" ? "" : " mutcell"}">${esc(met)}</td></tr>`;
+        })
+        .join("")}
+    </table>${
+      taskUnmet.length
+        ? `<p><span class="badge">blocked</span> <span class="mut">waiting on ${esc(taskUnmet.join(", "))} — a task with unmet deps is never claimed.</span></p>`
+        : `<p class="mut">All deps met.</p>`
+    }</div>`
+      : "";
+
     return `<!doctype html>
 <meta charset="utf-8"><title>Agent Bus — ${esc(task.id)}</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1552,6 +1690,7 @@ ${PAGE_CSS}
 </div>
 <p class="mut"><a href="/${projQ}">← back to the board</a></p>
 ${flash ? `<div class="flash">${esc(flash)}</div>` : ""}
+${depsHtml}
 
 <h2>The job as it was written</h2>
 <div class="card"><pre>${esc(task.prompt || "")}</pre></div>
@@ -1774,6 +1913,97 @@ ${
   })();
 }
 
+/* ── the note-history page ────────────────────────────────────────────────── */
+
+// /history/<key> — the read-only stack under a NOTE key (spec
+// recall-and-care.md §1–2; the handoff kind keeps its own richer page above).
+// It mirrors the `history` verb's answer and handoffPageHtml's shape: the
+// ACTIVE entry verbatim at top, then every kept prior entry numbered, each
+// named with its set-at/author AND its superseded-at/by, because "when did
+// this change and who changed it" is the whole point of keeping the archive.
+// Read-only like the handoff page: an archive is a record, not a queue — no
+// form, no notify, nothing posts from here.
+//
+// A key can carry history in BOTH stores (a note overwritten into a handoff,
+// or the reverse); the verb renders them per store and never merges them, so
+// this page does not either — merging would make "how far back does this go"
+// mean two things under one heading. Rendered per store, each only when
+// non-empty.
+function historyPageHtml(key, flash, proj) {
+  return (() => {
+    const state = stateFor(proj);
+    const projQ = proj && !proj.own ? `?p=${encodeURIComponent(proj.name)}` : "";
+    pruneAgents(state);
+    const ago = (iso) => {
+      if (!iso) return "";
+      const s = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
+      if (s < 60) return `${s}s ago`;
+      if (s < 3600) return `${Math.round(s / 60)}m ago`;
+      return `${Math.round(s / 3600)}h ago`;
+    };
+
+    const active = state.board?.[key];
+    // States written before any overwrite happened have neither store —
+    // that reads as "no history", not as an error.
+    const noteHist = Array.isArray(state.archive?.[key]) ? state.archive[key] : [];
+    const handoffHist = Array.isArray(state.handoffs?.[key]) ? state.handoffs[key] : [];
+
+    // Nothing was ever written under this key, or only an active entry with
+    // no history behind it lives here — the second renders (it was asked
+    // for by key), the first is a dead end and stays a 404.
+    if (!active && !noteHist.length && !handoffHist.length) return null;
+
+    const esc = (v) =>
+      String(v ?? "").replace(/[&<>"']/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]
+      );
+
+    // One prior entry, per store — the numbering matches handoffPageHtml's:
+    // the oldest kept entry is #1, the most recently superseded is the count.
+    const priorEntry = (h, i, n) =>
+      `<details class="lock"><summary><b>#${n - i}</b>
+      <span class="mut">set ${esc(h.at ?? "?")} by ${esc(h.by ?? "?")} · superseded ${esc(h.supersededAt ?? "?")} by ${esc(h.supersededBy ?? "?")}</span>
+      </summary>
+      <p class="msgtext">${esc(h.value ?? "")}</p></details>`;
+
+    const activeHtml = active
+      ? `<div class="card"><div class="row"><span class="dot"></span>
+      <b>${esc(active.kind === "handoff" ? "active handoff" : "active note")}</b>
+      <span class="mut">${esc(active.by ?? "?")} · ${esc(active.at ?? "?")}${active.at ? ` (${esc(ago(active.at))})` : ""}</span></div>
+      <p class="msgtext">${esc(active.value ?? "")}</p></div>`
+      : `<p class="mut">ACTIVE — gone from the board. The newest kept entry below names what this key last was.</p>`;
+
+    const stackHtml = (title, rows, note) =>
+      rows.length
+        ? `<h3>${esc(title)} (${rows.length})</h3>${rows
+            .map((h, i) => priorEntry(h, i, rows.length))
+            .join("")}`
+        : `<p class="mut">${esc(note)}</p>`;
+
+    return `<!doctype html>
+<meta charset="utf-8"><title>Agent Bus — ${esc(key)} history</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+${REFRESH_META(Date.now())}${REFRESH_JS}
+${PAGE_CSS}
+
+<div class="head">
+  <h1><span class="mut">history —</span> ${esc(key)}</h1>
+  <span class="mut">the stack kept under this board key, newest first, read-only</span>
+</div>
+<p class="mut"><a href="/${projQ}#note-${encodeURIComponent(key)}">← back to the board</a></p>
+${flash ? `<div class="flash">${esc(flash)}</div>` : ""}
+
+<h2>Board — the active entry</h2>
+${activeHtml}
+
+<h2>Kept history (${noteHist.length + handoffHist.length})</h2>
+${stackHtml("Note history", noteHist, "No superseded notes under this key yet — an overwrite archives one here.")}
+${stackHtml("Handoff history", handoffHist, "No superseded handoffs under this key — those live on the handoff page.")}
+<p class="mut">A prior entry is kept, not deleted — a fact that was true once stays
+  readable, and a correction carries the correction's own when and who.</p>`;
+  })();
+}
+
 /* ── this machine ─────────────────────────────────────────────────────────── */
 
 // What the hub is running on, read from the system rather than assumed. CPU
@@ -1842,6 +2072,64 @@ function hardwareHtml() {
 </div>`;
 }
 
+/* ── ask the bus ──────────────────────────────────────────────────────────── */
+
+// The person's LAST ask and its reply, held in the hub's memory keyed by the
+// space it was asked in, and each space keeps its own last reply (a map, not a
+// slot: asking on one page must not erase the reply showing on another).
+// Deliberately nothing else: a reply is not a board
+// note (filing it would broadcast a one-person answer to every agent), not a
+// task and not a message — the steward's askBus writes nothing (C4), and the
+// hub only remembers it long enough to put it back on the page. A hub restart
+// drops it; a fresh ask replaces it. askResultHtml renders it under the box,
+// for the space being viewed only.
+const lastAsks = {}; // spaceKey ("": hub) -> reply
+const spaceKeyOf = (proj) => (proj.own ? "" : proj.name);
+const lastAsk = (proj) => lastAsks[spaceKeyOf(proj)] ?? null;
+
+// Model selection, mirroring the steward tick's own plumbing exactly: the
+// steward's runner (STEWARD_RUNNER), resolved through the same findRunner
+// with its graceful shape — a problem in runners.json or no enabled runner
+// throws a HUMAN message, and the ask renders that message instead of a 500.
+function stewardRunnerOrProblem() {
+  try {
+    return { runner: findRunner(process.env.STEWARD_RUNNER) };
+  } catch (err) {
+    return { problem: err.message ?? String(err) };
+  }
+}
+
+/**
+ * The ask: read the space's state, hand askBus (steward.mjs, pure) the
+ * digest-plus-question prompt through the same askRunner the steward tick
+ * uses, remember the reply for this space only. Nothing is filed, nothing
+ * queued, no agent registered — the ask touches the bus read-only, so it
+ * runs BEFORE the actor borrow in runAction and before any project-space CLI
+ * child: no write path exists to attach an identity to.
+ */
+async function runAskAction(form, proj) {
+  const question = String(form.get("question") ?? "").trim();
+  if (!question) {
+    throw new Error("Ask the bus a question — an empty ask has nothing to answer.");
+  }
+  const { runner, problem } = stewardRunnerOrProblem();
+  if (problem) {
+    return `Ask the bus is asleep: no runner available (${problem}) — add one in runners.json, then ask again.`;
+  }
+  const started = Date.now();
+  const res = await askBus(stateFor(proj), question, (prompt) => askRunner(runner, prompt));
+  if (res.error) throw new Error(res.error);
+  const reply = {
+    q: res.question ?? question,
+    a: res.answer,
+    by: runner.label ?? runner.id,
+    at: new Date().toISOString(),
+    ms: Date.now() - started,
+  };
+  lastAsks[spaceKeyOf(proj)] = reply;
+  return `Answered by ${runner.label ?? runner.id} in ${Math.round(reply.ms / 100) / 10}s — it is under the Ask the bus box. Nothing was filed; this was a reply.`;
+}
+
 /**
  * Run one action on behalf of the person at the window.
  *
@@ -1860,6 +2148,8 @@ function hardwareHtml() {
  * THAT bus first, so the desk is attributed there too.
  */
 function runAction(action, form, proj = { own: true, root: PROJECT_ROOT }) {
+  // The ask is NOT an identity borrow — it writes nothing (see runAskAction).
+  if (action === "ask_bus") return runAskAction(form, proj);
   const actor = (form.get("actor") || "desk").trim() || "desk";
   // A browser POST is as short-lived as a CLI call: no pid to trust.
   return asActor(actor, () => {
@@ -2073,11 +2363,13 @@ function runDashboard(port) {
             // server becomes a memory bug.
             if (body.length > 64_000) req.destroy();
           });
-          req.on("end", () => {
+          req.on("end", async () => {
             const form = new URLSearchParams(body);
             let flash;
             try {
-              flash = runAction(form.get("action"), form, proj);
+              // Awaited because one action may ask a model (runAskAction);
+              // every other action resolves synchronously and is untouched.
+              flash = await runAction(form.get("action"), form, proj);
             } catch (err) {
               flash = `FAILED: ${err.message}`;
             }
@@ -2133,6 +2425,27 @@ function runDashboard(port) {
             res.writeHead(404, { "content-type": "text/html; charset=utf-8" });
             res.end(
               `${PAGE_CSS}<p class="mut" style="padding:26px 30px">No handoff under that key on this bus. <a href="/${proj.own ? "" : `?p=${encodeURIComponent(proj.name)}`}">← back to the board</a></p>`
+            );
+          } else {
+            res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+            res.end(html);
+          }
+          return;
+        }
+        // The note-history page: /history/<key> (spec recall-and-care.md
+        // §1–2) — the active entry plus every kept prior entry. Read-only, so
+        // it has none of a form's plumbing either.
+        const historyMatch = url.pathname.match(/^\/history\/([^/]+)$/);
+        if (historyMatch) {
+          const html = historyPageHtml(
+            decodeURIComponent(historyMatch[1]),
+            url.searchParams.get("flash"),
+            proj
+          );
+          if (html === null) {
+            res.writeHead(404, { "content-type": "text/html; charset=utf-8" });
+            res.end(
+              `${PAGE_CSS}<p class="mut" style="padding:26px 30px">Nothing was ever written under that key on this bus. <a href="/${proj.own ? "" : `?p=${encodeURIComponent(proj.name)}`}">← back to the board</a></p>`
             );
           } else {
             res.writeHead(200, { "content-type": "text/html; charset=utf-8" });

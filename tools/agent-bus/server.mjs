@@ -38,6 +38,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { cutoffWhy, ollamaOptions } from "./runner-limits.mjs";
+import { renderHealth } from "./health.mjs";
 import { buildIssueUrl, buildLesson, fetchFeed, renderFeed } from "./lessons.mjs";
 import { assertLoopback, buildRunnerDrafts, discoverLocal, renderDiscover } from "./discover.mjs";
 import {
@@ -287,7 +288,7 @@ function withState(fn) {
       else throw err;
     }
     if (!state || typeof state !== "object") {
-      state = { agents: {}, lock: null, messages: [], board: {}, tasks: [], taskSeq: 0, publishes: [] };
+      state = { agents: {}, lock: null, messages: [], board: {}, archive: {}, handoffs: {}, tasks: [], taskSeq: 0, publishes: [] };
     }
     state.agents ||= {};
     state.messages ||= [];
@@ -459,6 +460,82 @@ const handoffLines = (raw, what) => {
     .map((line) => cap(String(line).trim(), MAX_NOTE_CHARS))
     .filter((line) => line !== "");
 };
+
+/**
+ * An overwrite is not an erasure. `keepHistory` files the prior entry into
+ * `state[store][key]` before it is replaced — the same shape the handoff
+ * verb uses (newest first, cap 5, supersededAt/by alongside the clone).
+ * Called from note/miss; handoff runs its own identical block because it
+ * carries its field set. Store name is a parameter, not a hardcode, so a
+ * future kind keeps the same discipline without a third store name.
+ */
+const keepHistory = (state, store, key, prior, me) => {
+  state[store] ||= {}; // states written before history existed have none yet
+  const history = state[store][key] || [];
+  history.unshift({ ...structuredClone(prior), supersededAt: nowIso(), supersededBy: me });
+  state[store][key] = history.slice(0, 5);
+};
+
+/**
+ * searchBoard — the `search` verb's engine. Deliberately dumb: lowercase
+ * substring over active board values (and their keys), then kept handoff
+ * history and note history, active hits first because "what is on the board
+ * now" is what most queries mean. Deterministic order, no scoring, no
+ * model — a match that can be explained is worth more than a clever one
+ * nobody can audit (the blocker matcher's rule).
+ */
+const searchBoard = (state, query, limit) => {
+  const needle = query.toLowerCase();
+  const hits = [];
+  const addHit = (where, text) => {
+    for (const rawLine of String(text ?? "").split("\n")) {
+      if (hits.length >= limit) return true;
+      if (rawLine.toLowerCase().includes(needle)) {
+        hits.push({ where, line: cap(rawLine.trim(), 200) });
+      }
+    }
+    return false;
+  };
+  const board = Object.entries(state.board ?? {}).sort(
+    (a, b) => Date.parse(b[1].at) - Date.parse(a[1].at)
+  );
+  for (const [k, v] of board) {
+    // A key hit shows the entry's first line, not a "matched" value line —
+    // otherwise a key that contains the query AND a value line that does too
+    // would file the same line twice under two labels.
+    if (k.toLowerCase().includes(needle)) {
+      hits.push({ where: `${k} (active, key)`, line: cap(String(v.value).split("\n")[0].trim(), 200) });
+      if (hits.length >= limit) break;
+    }
+    if (addHit(`${k} (active)`, v.value)) break;
+  }
+  for (const [k, history] of Object.entries(state.handoffs ?? {})) {
+    for (let i = 0; i < history.length; i++) {
+      const h = history[i];
+      if (addHit(`${k} (handoff history #${i + 1}, set ${h.at})`, h.value)) return hits;
+    }
+  }
+  for (const [k, history] of Object.entries(state.archive ?? {})) {
+    for (let i = 0; i < history.length; i++) {
+      const h = history[i];
+      if (addHit(`${k} (note history #${i + 1}, set ${h.at})`, h.value)) return hits;
+    }
+  }
+  return hits;
+};
+
+/**
+ * Task dependencies. A dep "done" unlocks; gone-from-queue also unlocks —
+ * the queue's prune only ever drops finished tasks, so a missing dep was a
+ * meeting one, not a blocked one. Everything else (queued, running, draft,
+ * failed) blocks: a draft is an answer nobody has applied yet, which a
+ * dependent must not build on.
+ */
+const unmetDeps = (state, task) =>
+  (task.depends_on ?? []).filter((id) => {
+    const dep = (state.tasks ?? []).find((t) => t.id === id);
+    return dep != null && dep.status !== "done";
+});
 
 /** Can the OS still see this process? `kill(pid, 0)` sends no signal — it only
  *  asks whether that pid exists, and works on Windows and POSIX alike; EPERM
@@ -661,6 +738,37 @@ const TOOLS = [
     },
   },
   {
+    name: "history",
+    description:
+      "Return the stack under a board key: the ACTIVE entry (note or handoff — verbatim) plus every kept prior one, newest first, each named with its author, set-at and superseded-at/by. A fact that was replaced is not a fact that was erased.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        key: { type: "string", description: "The board key, exactly as written (e.g. handoff-camera)." },
+      },
+      required: ["key"],
+    },
+  },
+  {
+    name: "search",
+    description:
+      "Full-text search of the board and its kept history: notes, misses, handoffs and their prior entries. Case-insensitive substring — dumb, deterministic, explainable. Returns the key, where the hit sits and the matched line.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "The text to look for. Minimum one non-space character." },
+        limit: { type: "number", description: "Max matches returned. Default 20." },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "health",
+    description:
+      "Is this space decaying? Runs the shared contract: runners silent while a task says running, queues nobody is picking up, drafts waiting on a human apply, handoffs with an empty taken chain, blocks standing OPEN. Clean runs name everything they checked.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
     name: "ping",
     description:
       "One-line liveness: the cheapest mutating call, so an agent doing long local work between bus calls keeps showing on the board. Registers if you have not, refreshes lastSeen if you have.",
@@ -685,6 +793,7 @@ const TOOLS = [
         runner_id: { type: "string", description: "An id from runners(). Omitted = the bus fills the task's role from its measurements, or the lane's default until it has any." },
         role: { type: "string", description: "quick (an ordinary job, about one file's worth) or deep (a long or tricky one). Omitted = sized from the prompt. The bus picks the runner for the role from its own record; a miss is retried once on the role's next runner." },
         stage: { type: "string", description: "Optional — which workflow-spine stage this work belongs to: idea, spec, design, build, review, test, release, publish, monitor or maintain. Refused if it names none of them." },
+        depends_on: { type: "array", items: { type: "string" }, description: "Task ids this one waits on — it stays blocked (and is never claimed) while any dep is not done. Ids must exist; typos are refused, not forgotten." },
       },
       required: ["lane", "title", "prompt"],
     },
@@ -1026,9 +1135,10 @@ function callTool(name, args) {
         const me = requireName();
         touch(state);
         const prior = state.board[key];
+        if (prior) keepHistory(state, "archive", key, prior, me);
         state.board[key] = { value: cap(value, MAX_NOTE_CHARS), by: me, at: nowIso() };
         return prior
-          ? `Updated "${key}" (was set by ${prior.by}).`
+          ? `Updated "${key}" (was set by ${prior.by}; the old value is kept in history — history("${key}") reads it back).`
           : `Posted "${key}" to the board.`;
       });
     }
@@ -1064,6 +1174,10 @@ function callTool(name, args) {
         const key = "miss-" + slug;
         const prior = state.board[key];
         const seen = (prior && prior.seen ? prior.seen : 0) + 1;
+        // A recurring miss overwrites itself on purpose (the comment below);
+        // keep each prior report so the recurrence is readable, not just
+        // countable.
+        if (prior) keepHistory(state, "archive", key, prior, me);
         const value = [
           "SELF-REPORTED MISS" + (seen > 1 ? " (" + seen + "x — RECURRING)" : "") + ".",
           "CLAIMED: " + claimed,
@@ -1406,6 +1520,87 @@ function callTool(name, args) {
     // Everything at a glance. `agents` answers who is here and `board` answers
     // what they left behind; needing both to know the state of the bus is what
     // made it confusing to look at.
+    // §1–3 of docs/recall-and-care.md. Read-only stack read: ACTIVE verbatim
+    // (the board's value IS the rendered text for both kinds) plus every kept
+    // prior entry, each named by who and when — both its writing and its
+    // superseding. Two stores can hold history for one key (a note kept in
+    // `archive` later replaced by a handoff, or the reverse); they are
+    // rendered per store, never merged — merging would make "how far back
+    // does this go" mean two different things in one answer.
+    case "history": {
+      const key = String(args.key || "").trim();
+      if (!key) throw new Error("A `key` is required — the stack you mean is a named one.");
+      assertKey(key);
+      return withState((state) => {
+        const active = state.board[key];
+        const noteHist = state.archive?.[key] ?? [];
+        const handoffHist = state.handoffs?.[key] ?? [];
+        if (!active && !noteHist.length && !handoffHist.length) {
+          return `Nothing was ever written under "${key}".`;
+        }
+        const lines = [];
+        if (active) {
+          lines.push(`ACTIVE — set ${active.at} by ${active.by}`, active.value);
+        } else {
+          lines.push("ACTIVE — gone. The newest kept entry names what this key last was.");
+        }
+        // Numbering matches the pages (handoffPageHtml's convention): #1 is
+        // the OLDEST kept entry and the stack reads upward toward the live
+        // one — the same data as the store's newest-first order, rendered in
+        // the direction a reader moves (past → now).
+        if (handoffHist.length) {
+          lines.push("", `HANDOFF HISTORY (${handoffHist.length})`);
+          const n = handoffHist.length;
+          for (let i = n - 1; i >= 0; i--) {
+            const h = handoffHist[i];
+            lines.push(`#${n - i} — set ${h.at} by ${h.by}, superseded ${h.supersededAt} by ${h.supersededBy}`);
+            lines.push(`  ${h.value}`);
+          }
+        }
+        if (noteHist.length) {
+          lines.push("", `NOTE HISTORY (${noteHist.length})`);
+          const n = noteHist.length;
+          for (let i = n - 1; i >= 0; i--) {
+            const h = noteHist[i];
+            lines.push(`#${n - i} — set ${h.at} by ${h.by}, superseded ${h.supersededAt} by ${h.supersededBy}`);
+            lines.push(`  ${h.value}`);
+          }
+        }
+        return lines.join("\n");
+      });
+    }
+
+    case "search": {
+      const query = String(args.query ?? "").trim();
+      if (!query) {
+        throw new Error("`query` is required — an empty search would read as \"everything is a match\".");
+      }
+      const limit = Math.max(1, Math.min(Number(args.limit) || 20, 100));
+      return withState((state) => {
+        touch(state);
+        const hits = searchBoard(state, query, limit);
+        const scanned =
+          Object.keys(state.board ?? {}).length +
+          Object.values(state.handoffs ?? {}).reduce((n, h) => n + h.length, 0) +
+          Object.values(state.archive ?? {}).reduce((n, h) => n + h.length, 0);
+        if (!hits.length) {
+          return `No matches for "${cap(query, 80)}" (scanned ${scanned} active and kept entries).`;
+        }
+        const lines = [`${hits.length} match(es) for "${cap(query, 80)}" (scanned ${scanned} active and kept entries):`];
+        for (const h of hits) lines.push(`  ${h.where} — ${h.line}`);
+        return lines.join("\n");
+      });
+    }
+
+    case "health":
+      // Same shape as `status`: a read that prunes first, so the answer is
+      // about the bus as it is, not the bus as it was an hour ago.
+      return withState((state) => {
+        pruneAgents(state);
+        touch(state);
+        return renderHealth(state);
+      });
+
     case "status":
       return withState((state) => {
         pruneAgents(state);
@@ -1481,6 +1676,28 @@ function callTool(name, args) {
       return withState((state) => {
         touch(state);
         state.tasks ||= [];
+        // §5 recall-and-care — dependencies before anything else: a typo'd
+        // dependency is refused NOW, with the known ids listed, not queued to
+        // silently block forever.
+        let dependsOn = null;
+        if (args.depends_on != null) {
+          if (!Array.isArray(args.depends_on)) {
+            throw new Error("`depends_on` must be an array of task ids.");
+          }
+          const ids = [...new Set(args.depends_on.map((x) => String(x ?? "").trim()).filter(Boolean))];
+          if (ids.length > 10) {
+            throw new Error("More than 10 dependencies — that is a list, not a task. Split the work.");
+          }
+          const unknown = ids.filter((x) => !(state.tasks ?? []).some((t) => t.id === x));
+          if (unknown.length) {
+            const known = state.tasks.slice(-8).map((t) => t.id);
+            throw new Error(
+              `Unknown dependency id: ${unknown.join(", ")}. Known recent task ids: ${known.join(", ") || "none"}.` +
+              " A dependency that silently never unlocks is a convention pretending to be data.",
+            );
+          }
+          if (ids.length) dependsOn = ids;
+        }
         const id = nextTaskId(state);
         state.tasks.push({
           id,
@@ -1495,6 +1712,7 @@ function callTool(name, args) {
           // but a named one that matches no spine stage is refused, because a
           // typo'd tag that silently vanishes is a convention pretending to be data.
           stage: args.stage ? validateStage(args.stage) : null,
+          depends_on: dependsOn,
           by: myName || "cli",
           at: nowIso(),
         });
@@ -1532,7 +1750,8 @@ function callTool(name, args) {
             suggestion = suggestLine(rec);
           }
         }
-        return `Queued ${id} on lane "${args.lane || "local"}": ${args.title}` + (suggestion ? `\n${suggestion}` : "");
+        const depLine = dependsOn ? `\nBlocked until ${dependsOn.join(", ")} is done — unmet deps are never claimed.` : "";
+        return `Queued ${id} on lane "${args.lane || "local"}": ${args.title}` + depLine + (suggestion ? `\n${suggestion}` : "");
       });
 
     case "runners": {
@@ -1560,7 +1779,10 @@ function callTool(name, args) {
         return rows
           .map((t) => {
             const head = `${t.id} [${t.status}] ${t.lane} — ${t.title}`;
-            return t.result ? `${head}\n  ${t.result.slice(0, 400)}` : head;
+            const deps = (t.depends_on ?? []).length ? ` · deps ${t.depends_on.join(", ")}` : "";
+            const unmet = unmetDeps(state, t);
+            const wait = unmet.length ? `\n  BLOCKED — waiting on ${unmet.join(", ")}` : "";
+            return t.result ? `${head}${deps}${wait}\n  ${t.result.slice(0, 400)}` : `${head}${deps}${wait}`;
           })
           .join("\n");
       });
@@ -2062,7 +2284,11 @@ function askRunner(runner, prompt, onProgress, sink) {
 function claimNextTask(lane) {
   return withState((state) => {
     state.tasks ||= [];
-    const task = state.tasks.find((t) => t.lane === lane && t.status === "queued");
+    // A blocked task is never claimed — the skip reads in the task's own line
+    // (tasks() renders BLOCKED), so it is a visible shape, not silent.
+    const task = state.tasks.find(
+      (t) => t.lane === lane && t.status === "queued" && !unmetDeps(state, t).length,
+    );
     if (!task) {
       // An idle worker is still here — the empty poll is its heartbeat.
       // pruneAgents drops anyone an hour cold, and an idle worker polls
@@ -2467,6 +2693,24 @@ function runCli(argv) {
         registerCli(myName);
         return say(callTool("handoff_take", { key }));
       }
+      // Read the stack under a key from a shell — the superseded facts are
+      // kept on purpose; this is how a shell-only agent checks instead of
+      // recalls.
+      case "history": {
+        const [key] = rest0;
+        if (!key) throw new Error("usage: server.mjs history <key> — the board key to read the stack under");
+        return say(callTool("history", { key }));
+      }
+      // Board search from a shell. Quotes the query; extra words all count.
+      case "search": {
+        const q = rest.join(" ");
+        if (!q.trim()) throw new Error('usage: server.mjs search "<text to find>"');
+        return say(callTool("search", { query: q }));
+      }
+      // The bus checks itself from a shell — the same contract the caretaker
+      // runs every poll, on demand.
+      case "health":
+        return say(callTool("health", {}));
       // The spine's Review stage from a shell — same verdict, same refusals.
       case "review": {
         const [taskId, verdict, ...n] = rest;
