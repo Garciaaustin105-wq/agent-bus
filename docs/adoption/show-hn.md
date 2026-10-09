@@ -1,53 +1,37 @@
-# Show HN draft — ready to submit
+# Show HN draft — ready to submit (canonical; supersedes the 2026-10-09 folder draft)
 
-**Submitted by:** you (the user), at https://news.ycombinator.com/submit
+Post the GitHub link as a "Show HN" and paste the first comment below as your
+own comment right after (the norm — the comment carries the story, the link
+carries the repo). Best on a weekday morning US time.
 
 ## Title
 
-    Show HN: Agent-bus – a lock, noticeboard and bench for teams of AI agents
+    Show HN: Agent-Bus – a shared noticeboard that orchestrates AI coding agents
 
-(alt, if you'd rather lead with the pain it fixes: "Show HN: I run 5+ AI
-agents together; agent-bus stops them stepping on each other")
+(alt: "Show HN: I run 5+ AI agents together; agent-bus stops them stepping
+on each other")
 
-## Text
+## First comment (your voice, lowercase like reddit)
 
-Hi HN. I kept several AI coding agents working together in one repo — Claude
-sessions, a local model runner, shell scripts — and two things kept going
-wrong, neither fixable by talking more:
+i kept hitting the same problem: i run several AI coding agents (local ollama models + cloud) and each session dies with everything it learned. agent A fixes a table pattern, session ends, agent B re-derives the same fact two days later. copy-paste between chats was the only coordination tool.
 
-1. Two sessions used the same working tree and switched branches under each
-   other mid-edit.
-2. A lane spec went stale between being written and being read — four times.
-   Nobody was talking when each fact went stale, so no message could have
-   caught them.
+so i built agent-bus: a small node server (>= 20, no npm install, no build) that gives agents on one machine a durable shared surface:
 
-So I built the thing those failures imply: a shared **lock** (a claim is
-released by process death, not a heartbeat — `kill(pid, 0)` turns out to be
-exactly "is this session still real", which beats any TTL for the mid-rebase
-case), a **noticeboard** that outlives conversations, and messaging as the
-smaller third feature. There's also a bench that benchmarks the local models
-you already have, a handoff verb for session-to-session transfer, and a
-savings counter that reads the actual Claude transcripts and reports what
-every session spent — because the whole point of delegating to local models
-is the token bill, and it was invisible.
+- a keyed noticeboard for durable facts (notes, plus `miss` — agents report their own mistakes as claim/true pairs so the next agent checks instead of recalls)
+- a task queue aimed at local models (ollama by default) — answers land as drafts a human approves before they touch code
+- a `handoff` verb: one structured board entry holding session state, next step, open work, constraints — and `handoff_take` stamps a chain of custody, not a lock
+- working-tree claims so two agents never checkout/merge into each other
+- blocker → solver matching: a stuck agent reports what it needs, the bus asks whoever declared that capability
+- note history + search: an overwrite is never an erasure, so a wrong fact leaves a trail
+- a live dashboard with the full queue, board and a tokens-saved counter measured from exact task usage (no dollar figures, no rates to miscalculate)
+- the steward: a small local-model loop that triages problem notes and does review first-passes, but files everything as proposals — nothing auto-applies, a human gate decides
 
-No dependencies: raw JSON-RPC over stdio, plain Node ≥ 20. Runs as an MCP
-server, a CLI, and a small desktop dashboard — one repo, cloned and run.
+the trick underneath the coordination, honestly: the working-tree claim is released by process death, not a heartbeat — `kill(pid, 0)` is exactly "is this session still real", which beats any TTL for the mid-rebase case.
 
-Repo: https://github.com/Garciaaustin105-wq/agent-bus
+honest limits: single user per hub, everything trusts the same machine, there is no sandbox claim in SECURITY.md — the human gates are the gate. it is deliberately not a hosted service.
 
-Highlights I'd bet on:
+source + a plain README: https://github.com/Garciaaustin105-wq/agent-bus
+zip + checksums at https://github.com/Garciaaustin105-wq/agent-bus/releases (v0.1.4)
+17 test suites / 487 checks, all on temp dirs, never real state.
 
-- 487-check harness (17 suites) that all use temp dirs, never real state
-- Zero-dependency contract, enforced by a harness assertion, not comments
-- The steward pattern: a small local model (~7B) triages reported problems,
-  drafts the brief, and a person reviews before anything touches code
-- Cross-install lessons: a lesson travels as the shape of a mistake, never
-  anyone's actual data; only a human can make it a rulebook rule
-
-Windows-first (it began on a Windows box with three agents fighting over
-it); the CLI and dashboard are plain Node and run anywhere.
-
-Happy to answer questions about the design choices — especially the
-process-death lock vs heartbeat tradeoff, and the deliberate dumbness of
-"who can unblock this blocker" keyword matching.
+happy to answer questions. the interesting rabbit holes so far: why "a proposal, NOT the verdict" matters more than model choice, what happens when the board note is the thing an agent is told to fix (spoiler: self-edit guard), and why the bench never deletes anything.

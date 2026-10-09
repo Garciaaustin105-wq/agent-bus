@@ -1,56 +1,60 @@
-# awesome-mcp-servers PR draft — ready to file
+# awesome-mcp-servers PR draft — ready to file (canonical; supersedes the 2026-10-09 folder draft)
 
-Target repo: https://github.com/punkpeye/awesome-mcp-servers (the largest list).
+Target repo: https://github.com/punkpeye/awesome-mcp-servers (the largest list;
+entry format verified against the repo 2026-10-08 — entries are
+markdown links `- [owner/repo](url) 📇 🏠 … - one-liner`, no periods on
+descriptions, alphabetically ordered within each section).
 
-## Category choice
+## Where
 
-`agent-bus` is multi-agent coordination (locks, noticeboard, handoff, a runner
-queue — not commitments/escrow), so the closest existing sections are:
+Section `### Aggregators` (🤝/🔗 heading in the README) — direct precedent:
+Jovancoding/Network-AI's "Multi-agent orchestration with a
+race-condition-safe shared blackboard…" entry. Insert alphabetically:
+sort by the repo's display name — the G block of
+`[Garciaaustin105-wq/agent-bus](…)`.
 
-- **🛠️ Other Tools and Integrations** — safe, zero-friction.
-- **🤝 Agreements & Coordination** — their scope is commitments/escrow/paid
-  bounties; ours isn't that, so it risks a maintainer bounce.
+Alternative (only if the maintainer prefers): brand-new
+"Agent Orchestration" subsection — CONTRIBUTING allows new categories
+("please create one and maintain alphabetical order"). Offer it in the PR
+description; default to Aggregators.
 
-Recommendation: file it under **Other Tools and Integrations**, and let the
-maintainer move it if they'd rather split out a new "Agent Orchestration"
-subsection — CONTRIBUTING says new categories are allowed ("please create one
-and maintain alphabetical order"), so offer that as the option in the PR
-description and let them pick.
-
-## Entry (paste verbatim)
-
-Place alphabetically within the chosen section by server display name
-("agent-bus" sorts near the top of most sections). No npm badge — there is no
-npm package yet (`agent-bus` is unclaimed on npm; see `docs/packaging.md`);
-the language icon 📇 still applies (plain Node on disk):
+## The entry (paste verbatim)
 
 ```markdown
-- <a href="https://github.com/Garciaaustin105-wq/agent-bus">agent-bus</a> 📇 🏠 🍎 🪟 🐧 - A shared lock, noticeboard, message bus and task queue for teams of AI agents working one repo — process-death locks, session handoffs, a model bench, and a savings counter that reads your real transcripts.
+- [Garciaaustin105-wq/agent-bus](https://github.com/Garciaaustin105-wq/agent-bus) 📇 🏠 🍎 🪟 🐧 - Durable shared noticeboard, task queue and session handoffs for multi-agent coding fleets, with a local-model steward and a live dashboard.
 ```
 
-If the maintainer's convention is to include only entries that are installable
-from a package registry, drop the badge icon and the entry still stands
-(cloning is the install; the README's Getting it section is explicit).
+Badge legend check: 📇 = TypeScript/JS codebase ✓ (plain-node JS — no npm
+package; `agent-bus` is unclaimed on npm, see `docs/packaging.md`); 🏠 = local ✓
+(no hosted service); 🍎 🪟 🐧 ✓ (Node ≥ 20 runs all three). No 🎖️ (not an
+official reference implementation). No glama score badge yet — the repo is not
+Glama-indexed (see `directory-listings.md`); once indexed, add the badge the
+way Network-AI's line carries one.
 
 ## PR body
 
+Title: `Add Garciaaustin105-wq/agent-bus`
+
 ```markdown
-Adds agent-bus under Other Tools and Integrations.
+Adds agent-bus under Aggregators (alphabetical).
 
-agent-bus is a zero-dependency MCP server + CLI + dashboard that coordinates
-multiple AI agents working in one repo: an exclusive working-tree claim
-(released by process death, not a heartbeat), a keyed noticeboard that
-outlives conversations, a session-to-session handoff protocol, a task queue
-with router delegation to local Ollama/OpenAI-dialect models, and a
-cross-install lessons feed. Node ≥ 20, no npm install, 487-check harness.
+agent-bus is an MCP server (stdio, plain Node ≥ 20, no npm install or build)
+plus CLI and live desktop dashboard that gives AI coding agents on one
+machine a durable shared surface: a keyed noticeboard (with history and
+search — an overwrite is never an erasure), a task queue for local models
+with human-gated review (nothing auto-applies), working-tree claims released
+by process death instead of a heartbeat, blocker→solver matching, session
+handoffs with a taken chain, and a local-model steward loop that triages
+problems and drafts briefs — every verdict stays with a human.
 
-Happy to move it to a new "Agent Orchestration" subsection if you'd prefer
-that over Other Tools.
+- MIT
+- v0.1.4, 17 test suites / 487 checks (temp dirs, never real state)
+- SECURITY.md states the honest limits (single-user per hub, no sandbox claim)
 ```
 
 ## Steps for you (user)
 
-1. Fork punkpeye/awesome-mcp-servers.
-2. Edit README.md at the chosen section, paste the entry in alphabetical spot.
-3. Open the PR with the body above.
-4. If a lint/CI runs on the PR, match whatever an existing entry fails fast on.
+1. Fork punkpeye/awesome-mcp-servers, branch `add-agent-bus` off main.
+2. Edit README.md: paste the entry into Aggregators at the alphabetical spot.
+3. Open the PR with the title + body above; watch CI (it checks link
+   order/format) and fix anything it names.
