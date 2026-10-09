@@ -1,0 +1,14 @@
+# Smithery config — lets smithery.ai install the bus as a stdio MCP server.
+# The bus is plain Node (>= 20): no npm install, no build step to declare.
+# https://smithery.ai/docs
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties: {}
+  commandFunction: |-
+    (config) => ({
+      "command": "node",
+      "args": ["tools/agent-bus/server.mjs"],
+      "env": {}
+    })
