@@ -561,6 +561,87 @@ await check("a done task carries a review form; a review lands; the self-review 
   assert.equal(st3.tasks.find((x) => x.id === t.id).reviews.length, 1, "and nothing was recorded");
 });
 
+await check("the draft batch renders as a diff; ONE CLICK applies it; refusing writes nothing", async () => {
+  const stPath = path.join(stateDir, "state.json");
+  fs.mkdirSync(path.join(HOME, "sub"), { recursive: true });
+  fs.writeFileSync(path.join(HOME, "sub", "target.txt"), "const a = 1;\nconst b = 2;\n");
+  const hostile = '<script>alert(document.cookie)</script>';
+  const seed = JSON.parse(fs.readFileSync(stPath, "utf8"));
+  seed.taskSeq = (seed.taskSeq ?? 0) + 1;
+  seed.tasks.push({
+    id: `t${seed.taskSeq}`, lane: "local", title: "batch draft", prompt: "change the constant",
+    status: "done", runner: "somerunner", at: new Date().toISOString(),
+    result: `here you go:\n\`\`\`json\n[{"id":"E1","find":"const a = 1;","replace":"const a = 42;"}]\n\`\`\``,
+  });
+  seed.taskSeq += 1;
+  seed.tasks.push({
+    id: `t${seed.taskSeq}`, lane: "local", title: "hostile batch", prompt: "x",
+    status: "done", runner: "somerunner", at: new Date().toISOString(),
+    result: `[{"id":"E1","find":"${hostile}","replace":"ok"}]`,
+  });
+  fs.writeFileSync(stPath, JSON.stringify(seed, null, 2));
+  const page = await (await GET(`${base}/task/${seed.tasks.at(-1).id}`)).text();
+  assert.ok(page.includes("Draft batch (1)"), "the batch is recognized");
+  assert.ok(page.includes("&lt;script&gt;alert"), "a script tag in a find renders ESCAPED");
+  assert.ok(!page.includes("<script>alert"), "the hostile text is never a live tag");
+  const good = seed.tasks.at(-2);
+  const goodPage = await (await GET(`${base}/task/${good.id}`)).text();
+  assert.ok(goodPage.includes("apply batch") && goodPage.includes("target file"), "the one-click form is there");
+  // Dry: answers, writes nothing, records nothing.
+  const dry = await fetch(`${base}/task/${good.id}`, {
+    method: "POST", redirect: "manual",
+    headers: { "content-type": "application/x-www-form-urlencoded", origin: base },
+    body: `action=apply_batch&task_id=${good.id}&dry=1&file=sub/target.txt&back=${encodeURIComponent(`/task/${good.id}`)}`,
+  });
+  assert.equal(dry.status, 303, "the dry run posts");
+  assert.equal(
+    fs.readFileSync(path.join(HOME, "sub", "target.txt"), "utf8").includes("const a = 42;"),
+    false,
+    "a dry run wrote nothing"
+  );
+  let stNow = JSON.parse(fs.readFileSync(stPath, "utf8"));
+  assert.ok(!stNow.tasks.find((x) => x.id === good.id).artifacts, "a dry run recorded nothing");
+  // The real click.
+  const apply = await fetch(`${base}/task/${good.id}`, {
+    method: "POST", redirect: "manual",
+    headers: { "content-type": "application/x-www-form-urlencoded", origin: base },
+    body: `action=apply_batch&task_id=${good.id}&file=sub/target.txt&back=${encodeURIComponent(`/task/${good.id}`)}`,
+  });
+  assert.equal(apply.status, 303, "the apply posts");
+  assert.ok(
+    fs.readFileSync(path.join(HOME, "sub", "target.txt"), "utf8").includes("const a = 42;"),
+    "the file changed"
+  );
+  stNow = JSON.parse(fs.readFileSync(stPath, "utf8"));
+  const after = stNow.tasks.find((x) => x.id === good.id);
+  assert.equal(after.artifacts.length, 1, "the artifact is on the record");
+  assert.ok(after.artifacts[0].edits[0].replace.includes("const a = 42;"), "the stored pair is the diff");
+  const stamped = after.reviews?.at(-1);
+  assert.ok(stamped && stamped.verdict === "approve" && stamped.via === "task-page", "the apply stamped the one review timeline");
+  // A batch that cannot resolve: the REFUSE list in the flash, nothing written.
+  fs.writeFileSync(path.join(HOME, "sub", "target.txt"), "untouched\n");
+  const seedNoRes = JSON.parse(fs.readFileSync(stPath, "utf8"));
+  seedNoRes.taskSeq += 1;
+  seedNoRes.tasks.push({
+    id: `t${seedNoRes.taskSeq}`, lane: "local", title: "unresolvable", prompt: "x",
+    status: "done", runner: "somerunner", at: new Date().toISOString(),
+    result: `[{"id":"E1","find":"no such line anywhere","replace":"y"}]`,
+  });
+  fs.writeFileSync(stPath, JSON.stringify(seedNoRes, null, 2));
+  const failed = await fetch(`${base}/`, {
+    method: "POST", redirect: "manual",
+    headers: { "content-type": "application/x-www-form-urlencoded", origin: base },
+    body: `action=apply_batch&task_id=${seedNoRes.tasks.at(-1).id}&file=sub/target.txt&back=${encodeURIComponent("/.")}`,
+  });
+  const flash = new URL(failed.headers.get("location"), "http://127.0.0.1").searchParams.get("flash") ?? "";
+  assert.ok(flash.includes("REFUSE"), "the refusal shows WHY in the flash", flash);
+  assert.equal(
+    fs.readFileSync(path.join(HOME, "sub", "target.txt"), "utf8"),
+    "untouched\n",
+    "the refused batch wrote nothing"
+  );
+});
+
 await check("the savings headline is COMPACTION — local model work is a separate plain fact", async () => {
   const stPath = path.join(stateDir, "state.json");
   const seed = JSON.parse(fs.readFileSync(stPath, "utf8"));

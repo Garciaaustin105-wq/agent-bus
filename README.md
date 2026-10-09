@@ -240,7 +240,7 @@ renders the same way. Both are unset here.
 ## Verifying
 
 ```sh
-node tools/agent-bus/e2e-agent-bus.mjs        # 72 — stdio end to end, temp dirs only
+node tools/agent-bus/e2e-agent-bus.mjs        # 85 — stdio end to end, temp dirs only
 node tools/agent-bus/handoff-harness.mjs      # 17 — handoff + handoff_take: supersede, history cap, taken chain
 node tools/agent-bus/worktree-harness.mjs     # 13 — the worktree verb: tree + claim + handoff in one call, real git fixture
 node tools/agent-bus/agent-harness.mjs        # 33 — hub-agent dispatch rules
@@ -252,7 +252,7 @@ node tools/agent-bus/blockers-harness.mjs     # 24 — blocker matching + the fi
 node tools/agent-bus/routing-harness.mjs      # 30 — runner routing from the fleet's own record
 node tools/agent-bus/runner-limits-harness.mjs # 16 — per-runner budgets
 node tools/agent-bus/worker-tasks-harness.mjs # 12 — task queue state layer + state-growth caps
-node tools/agent-bus/hub-http-harness.mjs     # 32 — dashboard HTTP edge, one-hub rule, savings counter, app spaces, old-server cards
+node tools/agent-bus/hub-http-harness.mjs     # 33 — dashboard HTTP edge, one-hub rule, savings counter, app spaces, old-server cards, the draft-batch surface
 node tools/agent-bus/projects-harness.mjs     # 14 — the app-space registry + cross-space reads + vendored-copy warning
 node tools/agent-bus/steward-harness.mjs      # 40 — the steward's four duties, against a fake classifier
 node tools/agent-bus/bench-harness.mjs        # 23 — the bench contract: never deletes, hardware-gated
@@ -261,7 +261,7 @@ node tools/agent-bus/recall-harness.mjs       # 46 — note history + history()/
 node tools/agent-bus/npm-pack-harness.mjs     # 9  — the npm package contract: zero deps, bin shebang, version parity, pack→install→state-lands-in-the-project (skipped with a reason where npm is absent)
 ```
 
-509 checks in total. All suites use temp dirs and never touch real state.
+523 checks in total. All suites use temp dirs and never touch real state.
 
 ## Learning across installs
 

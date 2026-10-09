@@ -42,7 +42,7 @@ import { cutoffWhy, ollamaOptions } from "./runner-limits.mjs";
 import { renderHealth } from "./health.mjs";
 import { buildIssueUrl, buildLesson, fetchFeed, renderFeed } from "./lessons.mjs";
 import { assertLoopback, buildRunnerDrafts, discoverLocal, renderDiscover } from "./discover.mjs";
-import { refuseBusSelfEdit } from "./edits.mjs";
+import { applyEdits, extractEdits, formatResult, refuseBusSelfEdit } from "./edits.mjs";
 import {
   blockAnnounce,
   blockMessage,
@@ -485,6 +485,16 @@ const worktreeBaseRef = (root, from) => {
   }
   return "HEAD";
 };
+
+/* docs/review-surface.md — artifact caps for the edit verb. A batch stored on
+ * the task is the reviewer's diff AND the audit; the caps keep one
+ * pathological draft from outgrowing the state file. Over-cap content is
+ * TRUNCATED WITH A MARKER, never silently joined. */
+const EDIT_FIELD_CAP = 4_000;
+const EDIT_BATCH_CAP = 20;
+const ARTIFACT_CAP = 5;
+const capArtifactField = (s, n) =>
+  s.length <= n ? s : s.slice(0, n) + "\n…truncated";
 // List fields accept the loose shapes a hurried writer actually sends: plain
 // strings become {title} items or pointer lines. An absent field is an empty
 // list — that is normal (most handoffs have no constraints) — but an unusable
@@ -721,6 +731,22 @@ const TOOLS = [
         minutes: { type: "number", description: "Claim length; default 30, max 240." },
       },
       required: ["name"],
+    },
+  },
+  {
+    name: "edit",
+    description:
+      "Apply a batch of edits (the edits protocol's {id, find, replace} JSON) to a file in this project, tied to a task — the reviewer's one click, as a call. All-or-nothing: a batch that cannot resolve exactly is refused and NOTHING is written or recorded. The applied batch is stamped on the task as an artifact, which the task page renders as a diff. `dry` answers with the resolution and records nothing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task_id: { type: "string", description: "The task this batch belongs to. Unknown ids are refused with the queue pointer." },
+        file: { type: "string", description: "Target file, relative to the project root. Outside the root is refused; a target inside the bus's own directory is refused (the self-edit guard)." },
+        edits: { type: "array", description: "The batch: [{id, find, replace}]. Exactly one of `edits` or `in`." },
+        in: { type: "string", description: "A file of model output to extract the batch from (fences and chatter tolerated). Exactly one of `edits` or `in`." },
+        dry: { type: "boolean", description: "Check the batch resolves; write and record nothing." },
+      },
+      required: ["task_id", "file"],
     },
   },
   {
@@ -1240,6 +1266,110 @@ function callTool(name, args) {
       ].join("\n");
     }
 
+    case "edit": {
+      // docs/review-surface.md. The queue's draft for code is a batch of
+      // {id, find, replace} edits in task.result; this verb applies a batch
+      // to a file and records what changed on the task. Refusals first: the
+      // task must exist, the file must be a leaf in the project, the guard
+      // keeps the bus's own code out of range — before anything is read.
+      const task_id = String(args.task_id || "").trim();
+      const fileArg = String(args.file || "").trim();
+      const dry = Boolean(args.dry);
+      if (!task_id) throw new Error("`task_id` is required — which task is this batch part of?");
+      if (!fileArg) throw new Error("`file` is required — the target, relative to the project root.");
+      if (args.edits == null && args.in == null) {
+        throw new Error("Need exactly one of `edits` (the batch array) or `in` (a file of model output).");
+      }
+      if (args.edits != null && args.in != null) {
+        throw new Error("Both `edits` and `in` given — exactly one must be present.");
+      }
+      const me = requireName();
+      const root = path.resolve(PROJECT_ROOT);
+      const fold = (p) => (process.platform === "win32" ? p.toLowerCase() : p);
+      const target = path.resolve(root, fileArg);
+      if (fold(target) !== fold(root) && !fold(target).startsWith(fold(root) + path.sep)) {
+        throw new Error(`${fileArg} is outside the project — edits write code in the repo they serve, nowhere else.`);
+      }
+      const guarded = refuseBusSelfEdit(target, import.meta.dirname);
+      if (guarded) throw new Error(guarded);
+
+      let rawEdits;
+      if (args.in != null) {
+        const inPath = path.resolve(String(args.in));
+        try {
+          rawEdits = extractEdits(fs.readFileSync(inPath, "utf8"));
+        } catch (err) {
+          throw new Error(`could not read the batch from ${inPath}: ${err.message}`);
+        }
+      } else {
+        if (!Array.isArray(args.edits) || args.edits.length === 0) {
+          throw new Error("`edits` must be a non-empty JSON array of {id, find, replace}.");
+        }
+        rawEdits = args.edits;
+      }
+
+      // The task is checked BEFORE the file is touched — an applied batch whose
+      // task vanished between apply and record would leave file-without-record.
+      withState((state) => {
+        if (!(state.tasks ?? []).some((t) => t.id === task_id)) {
+          throw new Error(`No task "${task_id}". tasks() lists the queue.`);
+        }
+      });
+
+      let src;
+      try {
+        src = fs.readFileSync(target, "utf8");
+      } catch (err) {
+        throw new Error(`could not read ${target}: ${err.message}`);
+      }
+      const result = applyEdits(src, rawEdits);
+      const summary = formatResult(result, rawEdits.length);
+      if (!result.ok) {
+        throw new Error(`edits refused — nothing written, nothing recorded.\n${summary}`);
+      }
+      const relFile = path.relative(root, target).replace(/\\/g, "/");
+      if (dry) {
+        return [
+          `dry run — the batch resolves (${result.eol}); nothing written, nothing recorded.`,
+          "",
+          summary,
+        ].join("\n");
+      }
+      fs.writeFileSync(target, result.text);
+
+      const record = {
+        kind: "edits",
+        file: relFile,
+        eol: result.eol,
+        by: me,
+        at: nowIso(),
+        applied: result.applied.map(({ id, line, delta }) => ({ id, line, delta })),
+        edits: rawEdits.slice(0, EDIT_BATCH_CAP).map((e, i) => ({
+          id: String(e?.id ?? `#${i + 1}`),
+          find: capArtifactField(String(e?.find ?? ""), EDIT_FIELD_CAP),
+          replace: capArtifactField(String(e?.replace ?? ""), EDIT_FIELD_CAP),
+        })),
+        ...(rawEdits.length > EDIT_BATCH_CAP
+          ? { capped: `${rawEdits.length - EDIT_BATCH_CAP} more edits not stored` }
+          : {}),
+      };
+      return withState((state) => {
+        touch(state);
+        const task = (state.tasks ?? []).find((t) => t.id === task_id);
+        if (!task) throw new Error(`No task "${task_id}" — it left the queue between the check and the apply.`);
+        task.artifacts ??= [];
+        task.artifacts.push(record);
+        if (task.artifacts.length > ARTIFACT_CAP) task.artifacts = task.artifacts.slice(-ARTIFACT_CAP);
+        return [
+          `Applied ${record.edits.length} edits to ${relFile}.`,
+          "",
+          summary,
+          "",
+          `Recorded on task ${task_id} as an artifact — the task page renders it as a diff.`,
+        ].join("\n");
+      });
+    }
+
     case "send": {
       const to = String(args.to || "").trim();
       const text = cap(String(args.message || ""), MAX_MESSAGE_CHARS);
@@ -1607,7 +1737,11 @@ function callTool(name, args) {
         // "queued" only, so an unapproved draft is work no worker can touch.
         const dispatching = task.status === "draft" && verdict === "approve";
         task.reviews ??= [];
-        task.reviews.push({ verdict, by: me, notes: notes || null, at: nowIso() });
+        // `via` is where the verdict came from — "apply" is a dispatch made
+        // work, "task-page" is the review surface's one click. It is a
+        // provenance stamp on the SAME timeline, never a second vocabulary.
+        const via = cap(String(args.via || "").trim(), 40);
+        task.reviews.push({ verdict, by: me, via: via || null, notes: notes || null, at: nowIso() });
         if (task.reviews.length > 10) task.reviews = task.reviews.slice(-10);
         if (dispatching) task.status = "queued";
         return `${verdict === "approve" ? "Approved" : "Changes requested on"} ${taskId}` +
@@ -3056,6 +3190,28 @@ function runCli(argv) {
         opts.name = words[0];
         return say(callTool("worktree", opts));
       }
+      case "edit": {
+        // docs/review-surface.md — the agent-driven apply: edits protocol
+        // batch to a file, stamped on the task. --in consumes its value; the
+        // index-parse pattern because a naive filter leaked VALUES into
+        // positionals once (the bench --judge lesson).
+        const opts = {};
+        const words = [];
+        for (let i = 0; i < rest0.length; i++) {
+          const f = rest0[i];
+          if (f === "--in") opts.in = rest0[++i];
+          else if (f === "--dry") opts.dry = true;
+          else words.push(f);
+        }
+        myName = process.env.AGENT_BUS_NAME || "cli";
+        registerCli(myName);
+        opts.task_id = words[0];
+        opts.file = words[1];
+        if (!opts.in) {
+          throw new Error("usage: server.mjs edit <task> <file> --in <model-output.json> [--dry]");
+        }
+        return say(callTool("edit", opts));
+      }
       // Opt-in sharing with other installs. NOTHING is sent: the note is
       // scrubbed to problem-shape locally, the draft is printed, and the human
       // decides — by opening a prefilled issue URL — whether this machine's
@@ -3179,6 +3335,8 @@ function printHelp(say) {
   say("  open [port]         the dashboard, plus its own chromeless window");
   say("  worktree <name> [--from ref] [--branch b] [--handoff key] [--no-handoff]");
   say("                      a lane's first move in one call: tree + claim + the handoff");
+  say("  edit <task> <file> --in <batch.json> [--dry]");
+  say("                      apply a draft's edits batch to a file — on the task's record");
   say("  init [--project <root>]");
   say("                      register the project in its .mcp.json (merge, never clobber)");
   say("  mcp                 force the stdio MCP server (the no-argument behavior, named)");

@@ -45,6 +45,10 @@ import {
   withState,
 } from "./server.mjs";
 import { readRegistry, resolveProject } from "./projects.mjs";
+// The review surface (docs/review-surface.md): the queue's code draft is a
+// batch of edits JSON in task.result. extractEdits is the pure recover-from-
+// prose half; the batch is rendered per request, never stored at parse time.
+import { extractEdits } from "./edits.mjs";
 import {
   runStewardTick,
   runStewardReviewTick,
@@ -1629,6 +1633,71 @@ function taskPageHtml(id, flash, proj) {
     // THIS page with a `back` field so the redirect lands here again, not on
     // the board. Where the task sits on the spine is a chip, not prose.
     const postUrl = `/task/${encodeURIComponent(task.id)}${projQ ? "?" + projQ.slice(1) : ""}`;
+
+    // The review surface (docs/review-surface.md). A code draft on the queue
+    // is a batch of {id, find, replace} edits in task.result — rendered as
+    // the BEFORE/AFTER pairs the reviewer can actually read, never as raw
+    // JSON. Best-effort PER RENDER: no batch in the result means the section
+    // is simply absent, and a prose task renders prose, as it always did.
+    // A batch is never re-sent by the form — the APPLY action re-parses the
+    // task's own result, so the record is the source.
+    let draftBatchHtml = "";
+    if (task.result && status !== undefined) {
+      let batch = null;
+      try {
+        batch = extractEdits(task.result);
+      } catch {
+        batch = null;
+      }
+      if (batch && batch.length) {
+        const shown = batch.slice(0, 20);
+        const pairs = shown
+          .map((e, i) => {
+            const id = String(e?.id ?? `#${i + 1}`);
+            return `<div class="msg"><b>${esc(id)}</b>
+              <pre style="background:rgba(220,50,47,.08);white-space:pre-wrap;word-break:break-word;margin:0">− ${esc(e?.find ?? "")}</pre>
+              <pre style="background:rgba(133,153,0,.10);white-space:pre-wrap;word-break:break-word;margin:0">+ ${esc(e?.replace ?? "")}</pre>
+            </div>`;
+          })
+          .join("");
+        const more =
+          batch.length > shown.length
+            ? `<p class="mut">${batch.length - shown.length} more edit${batch.length - shown.length === 1 ? "" : "s"} not shown — the full batch goes out with the apply.</p>`
+            : "";
+        draftBatchHtml = `<h2>Draft batch (${batch.length})</h2>
+<div class="card">${pairs}${more}
+  <form method="post" action="${esc(postUrl)}" class="row">
+    <input type="hidden" name="action" value="apply_batch">
+    <input type="hidden" name="task_id" value="${esc(task.id)}">
+    <input type="hidden" name="back" value="${esc(postUrl)}">
+    <input type="text" name="file" placeholder="target file (relative to the project root)" required>
+    <button type="submit" name="dry" value="1">dry run</button>
+    <button type="submit">apply batch</button>
+  </form>
+  <p class="mut">Apply is all-or-nothing: a batch that cannot resolve exactly is refused (the REFUSE list shows why), nothing is written, nothing stamped.</p>
+</div>`;
+      }
+    }
+
+    // What the ACTS of approval left behind — an artifact is recorded only at
+    // apply time, and the render truncates beyond 20 pairs with a marker.
+    const artifactsHtml = (task.artifacts ?? []).length
+      ? `<h2>Changes applied on this task (${task.artifacts.length})</h2>${task.artifacts
+          .map(
+            (a) => `<div class="card">
+        <div class="mut"><b style="color:inherit">${esc(a.file)}</b> · ${esc(a.by)} · ${esc(ago(a.at))} · ${esc(String((a.applied ?? []).length))} edit${(a.applied ?? []).length === 1 ? "" : "s"} · ${esc(a.eol)}${a.capped ? ` · ${esc(a.capped)}` : ""}</div>
+        ${(a.edits ?? [])
+          .slice(0, 20)
+          .map((p) => `<div class="msg"><b>${esc(p.id)}</b>
+            <pre style="background:rgba(220,50,47,.08);white-space:pre-wrap;word-break:break-word;margin:0">− ${esc(p.find)}</pre>
+            <pre style="background:rgba(133,153,0,.10);white-space:pre-wrap;word-break:break-word;margin:0">+ ${esc(p.replace)}</pre>
+          </div>`)
+          .join("")}
+        ${(a.edits ?? []).length > 20 ? `<p class="mut">${(a.edits ?? []).length - 20} more pairs not shown (the stored cap is 20).</p>` : ""}
+      </div>`
+          )
+          .join("")}`
+      : "";
     const reviews = (task.reviews ?? [])
       .map(
         (r) => `<div class="msg">
@@ -1697,6 +1766,9 @@ ${depsHtml}
 
 <h2>What came back</h2>
 ${result}
+
+${draftBatchHtml}
+${artifactsHtml}
 
 <h2>Reviews (${(task.reviews ?? []).length})</h2>
 ${task.firstPass
@@ -2189,6 +2261,35 @@ function runAction(action, form, proj = { own: true, root: PROJECT_ROOT }) {
           verdict: form.get("verdict"),
           notes: form.get("notes") || "",
         });
+      case "apply_batch": {
+        // docs/review-surface.md — the reviewer's one click. The form never
+        // re-sends the batch; the task's result is parsed AGAIN here, so the
+        // record is the source and a stale page cannot apply a phantom
+        // batch. The apply IS the approval — the same review timeline gets
+        // the stamp with via "task-page" on it (a queued/running task
+        // carries no verdict; the artifact is the record).
+        const taskId = form.get("task_id");
+        const task = (stateFor(proj).tasks ?? []).find((t) => t.id === taskId);
+        let batch;
+        try {
+          batch = extractEdits(task?.result ?? "");
+        } catch {
+          throw new Error(`No edits batch found in ${taskId}'s result — the draft is not a batch, so there is nothing to apply.`);
+        }
+        if (!batch || !batch.length) {
+          throw new Error(`No edits batch found in ${taskId}'s result — the draft is not a batch, so there is nothing to apply.`);
+        }
+        const dry = form.get("dry") === "1";
+        const out = callTool("edit", { task_id: taskId, file: form.get("file"), edits: batch, dry });
+        if (dry) return out;
+        try {
+          callTool("review", { task_id: taskId, verdict: "approve", via: "task-page", notes: "draft batch applied from the page" });
+        } catch {
+          // Review's own refusals (queued/running, self-review) stand — the
+          // artifact the edit wrote is the record either way.
+        }
+        return out;
+      }
       case "publish":
         return callTool("publish", {
           version: form.get("version"),
@@ -2236,6 +2337,46 @@ function runProjectAction(action, form, proj, actor) {
         (a, i) => i < 3 || a !== ""
       );
       break;
+    case "apply_batch": {
+      // docs/review-surface.md, one space over: the batch is parsed from the
+      // project task's result HERE and handed to the child as a temp file (the
+      // child's edit verb reads `--in`). The one-shot child carries the actor's
+      // name, so the artifact and the review stamp are attributed there too.
+      const batchTask = (readStateForRoot(proj.root).tasks ?? []).find((t) => t.id === form.get("task_id"));
+      let batch;
+      try {
+        batch = extractEdits(batchTask?.result ?? "");
+      } catch {
+        batch = null;
+      }
+      if (!batch || !batch.length) {
+        throw new Error(`No edits batch found in ${form.get("task_id")}'s result in this space — nothing to apply.`);
+      }
+      const batchFile = path.join(os.tmpdir(), `ab-batch-${randomUUID()}.json`);
+      fs.writeFileSync(batchFile, JSON.stringify(batch));
+      const dry = form.get("dry") === "1";
+      args = ["edit", form.get("task_id"), form.get("file"), "--in", batchFile];
+      if (dry) args.push("--dry");
+      return (() => {
+        try {
+          const out = execFileSync(
+            process.execPath,
+            [path.join(import.meta.dirname, "server.mjs"), ...args],
+            { env, encoding: "utf8", timeout: 30_000, windowsHide: true }
+          );
+          return (out || "").trim() || "Done.";
+        } catch (err) {
+          const detail = `${err.stdout ?? ""}${err.stderr ?? ""}${err.message ?? ""}`
+            .trim()
+            .split("\n")
+            .slice(-2)
+            .join(" ");
+          throw new Error(detail.slice(0, 400) || "the project-space batch apply failed");
+        } finally {
+          try { fs.rmSync(batchFile, { force: true }); } catch { /* temp; harmless if it lingers */ }
+        }
+      })();
+    }
     case "publish":
       args = ["publish", form.get("version"), form.get("what")];
       break;

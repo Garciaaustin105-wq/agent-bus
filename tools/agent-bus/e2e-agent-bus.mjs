@@ -71,8 +71,8 @@ t("initialize returns a protocol version", !!init.result?.protocolVersion, JSON.
 t("...and identifies the server", init.result?.serverInfo?.name === "agent-bus");
 await b.rpc("initialize", {});
 const list = await a.rpc("tools/list", {});
-t("tools/list returns the tool set — including the review, apply, publish and worktree surfaces",
-  (list.result?.tools?.length ?? 0) === 29,
+t("tools/list returns the tool set — including the review, apply, worktree and edit surfaces",
+  (list.result?.tools?.length ?? 0) === 30,
   `got ${list.result?.tools?.length}`);
 t("every tool declares an input schema",
   list.result.tools.every((x) => x.inputSchema && x.inputSchema.type === "object"));
@@ -341,6 +341,69 @@ const again = await a.call("apply", { task_id: "t99" });
 t("a second apply is refused — queued is already work", again.isError && again.text.includes("already work"), again.text);
 const ghost = await a.call("apply", { task_id: "t999" });
 t("apply on an unknown id is refused with the queue pointer", ghost.isError && ghost.text.includes("No task"), ghost.text);
+
+console.log("\n[edit — the review surface's apply, as a verb]");
+// The queue's code draft is a batch of {id, find, replace} edits in
+// task.result (docs/review-surface.md). The edit verb applies a batch to a
+// file and records it on the task — the failure being pinned is the partial:
+// a batch refused but a file half-written, or a file written whose task
+// record is empty.
+fs.mkdirSync(path.join(HOME, "sub"), { recursive: true });
+fs.writeFileSync(path.join(HOME, "sub", "a.txt"), "const a = 1;\nconst b = 2;\n");
+const seed = JSON.parse(fs.readFileSync(homeState, "utf8"));
+seed.taskSeq = Math.max(seed.taskSeq ?? 0, 199);
+seed.tasks.push({
+  id: "t199", lane: "fixes", title: "the batch task", prompt: "PROBLEM: change the constant.",
+  status: "done", runner: "some-worker", result: "drafted, see the batch",
+  by: "steward", at: new Date().toISOString(),
+});
+fs.writeFileSync(homeState, JSON.stringify(seed, null, 2));
+const artifactsOf = () => JSON.parse(fs.readFileSync(homeState, "utf8")).tasks.find((x) => x.id === "t199").artifacts;
+const happy = await a.call("edit", {
+  task_id: "t199", file: "sub/a.txt",
+  edits: [{ id: "E1", find: "const a = 1;\n", replace: "const a = 42;\n" }],
+});
+t("edit applies a resolvable batch", !happy.isError, happy.text);
+t("...and the file changed", fs.readFileSync(path.join(HOME, "sub", "a.txt"), "utf8").includes("const a = 42;"));
+t("...and the ARTIFACT is on the task record", JSON.stringify(artifactsOf()).includes("const a = 42;"));
+const refused = await a.call("edit", {
+  task_id: "t199", file: "sub/a.txt",
+  edits: [{ id: "E1", find: "const", replace: "let" }],
+});
+t("a batch that matches twice is refused — nothing recorded", refused.isError, refused.text);
+t("...and the file did NOT change", fs.readFileSync(path.join(HOME, "sub", "a.txt"), "utf8").includes("const b = 2;"));
+t("...and the artifact list did not grow", artifactsOf().length === 1);
+const ghostEdit = await a.call("edit", {
+  task_id: "t404", file: "sub/a.txt",
+  edits: [{ id: "E1", find: "const b = 2;\n", replace: "const b = 9;\n" }],
+});
+t("edit on an unknown task is refused", ghostEdit.isError && ghostEdit.text.includes("No task"), ghostEdit.text);
+const before = fs.readFileSync(path.join(HOME, "sub", "a.txt"), "utf8");
+const drying = await a.call("edit", {
+  task_id: "t199", file: "sub/a.txt", dry: true,
+  edits: [{ id: "E1", find: "const b = 2;\n", replace: "const b = 9;\n" }],
+});
+t("a dry run says the batch would resolve", !drying.isError && drying.text.includes("dry run"), drying.text);
+t("...and wrote nothing", fs.readFileSync(path.join(HOME, "sub", "a.txt"), "utf8") === before);
+t("...and recorded nothing", artifactsOf().length === 1);
+const escaper = await a.call("edit", {
+  task_id: "t199", file: "../escape.txt",
+  edits: [{ id: "E1", find: "x", replace: "y" }],
+});
+t("a path outside the project is refused", escaper.isError && /outside the project/.test(escaper.text), escaper.text);
+// Cap: five artifacts are kept, the oldest DROPPED — the bus's cap pattern.
+for (let i = 0; i < 6; i++) {
+  const prior = fs.readFileSync(path.join(HOME, "sub", "a.txt"), "utf8");
+  fs.writeFileSync(path.join(HOME, "sub", "a.txt"), prior + `\n// rev ${i}\nconst a = 1;\n`);
+  const r = await a.call("edit", {
+    task_id: "t199", file: "sub/a.txt",
+    edits: [{ id: "E1", find: "const a = 1;\n", replace: `const a = ${100 + i};\n` }],
+  });
+  if (r.isError) t(`cap run ${i} applied`, false, r.text);
+}
+t("the task keeps the FIVE newest artifacts", artifactsOf().length === 5 && artifactsOf()[0].edits[0].replace.includes("const a = 101;"));
+t("a fleet that never calls edit behaves identically — no state shape change beyond task.artifacts",
+  fs.existsSync(homeState));
 
 console.log("\n[bad input never takes the server down]");
 t("unknown tool errors without dying", (await a.call("no_such_tool")).isError);
