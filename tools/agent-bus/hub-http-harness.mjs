@@ -737,6 +737,65 @@ await check("the hub's own page totals tokens saved across EVERY space, one row 
   }
 });
 
+await check("worktree sessions roll into their repo's space — a real sibling project does not", async () => {
+  // 2026-10-10 audit: one lowvoltage-app worktree had 202.6M saved over 10
+  // compactions that NO panel counted, because Claude Code transcribes
+  // worktree sessions under the WORKTREE root's own slug. A worktree is
+  // always at <repo>/.claude/worktrees/*, whose transcript-dir slug is the
+  // repo's slug followed by "--" (the "/" and the "." of ".claude" each
+  // became a dash). The dash-count IS the boundary: a sibling PROJECT
+  // (…-lowvoltage-app-onboard, one dash past the repo) is a different app
+  // and must stay out of the repo's numbers.
+  const projectsDir = path.join(os.homedir(), ".claude", "projects");
+  // The slug base is the hub's own ROOT (HOME), not homedir — os.tmpdir()
+  // resolves to the 8.3 short path here, so homedir and the root differ.
+  const homeSlug = HOME.replace(/[^a-zA-Z0-9]/g, "-");
+  const turn = (r, w, i) =>
+    `{"type":"assistant","message":{"usage":{"cache_read_input_tokens":${r},"cache_creation_input_tokens":${w},"input_tokens":${i},"output_tokens":10}}}`;
+  const wtDir = path.join(projectsDir, `${homeSlug}--claude-worktrees-rolluptest`);
+  fs.mkdirSync(wtDir, { recursive: true });
+  fs.writeFileSync(path.join(wtDir, "wtcomp.jsonl"), [
+    turn(90000, 10000, 500), turn(105000, 1000, 200),
+    '{"type":"system","compactMetadata":{}}',
+    turn(5000, 3000, 100), turn(8200, 100, 50),
+  ].join("\n") + "\n");
+  const sibDir = path.join(projectsDir, `${homeSlug}-rollupsibling`);
+  fs.mkdirSync(sibDir, { recursive: true });
+  fs.writeFileSync(path.join(sibDir, "sibcomp.jsonl"), [
+    turn(90000, 10000, 500), turn(105000, 1000, 200),
+    '{"type":"system","compactMetadata":{}}',
+    turn(5000, 3000, 100), turn(8200, 100, 50),
+  ].join("\n") + "\n");
+  try {
+    // The by-space check above left a cached {missing: rows:[]} entry for the
+    // hub's main session dir (its compburn fixture was cleaned up). Bumping
+    // the state file makes the next GET re-render — and the wait + the poll
+    // loop let the tiny harness session cache (TTL 100ms here) expire so that
+    // render reads the fixtures instead of the pre-fixture empty.
+    const stPath = path.join(stateDir, "state.json");
+    fs.writeFileSync(stPath, fs.readFileSync(stPath));
+    await new Promise((r) => setTimeout(r, 350));
+    let html = "";
+    for (let i = 0; i < 20; i++) {
+      html = await (await GET(`${base}/`)).text();
+      if (html.includes("<td>this hub</td>") && /<td>this hub<\/td>.*?90,000.*?<\/tr>/.test(html)) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    const panel = (html.split("<h2>Tokens saved")[1] ?? "").split("<h2")[0];
+    const hubRow = /<td>this hub<\/td>.*?<\/tr>/.exec(panel)?.[0] ?? "";
+    assert.ok(hubRow.includes("90,000"), `worktree compactions roll into the repo's row: ${hubRow}`);
+    assert.ok(hubRow.includes("<td class=\"num\">1</td>"), "the worktree event counts on the by-space row");
+    assert.ok(!hubRow.includes("180,000"), "the sibling's own 90k did NOT stack onto the repo's row");
+    // The hub's own page lists rolled-in sessions beside its own.
+    const hubSessions = await (await GET(`${base}/`)).text();
+    assert.ok(hubSessions.includes("wtcomp"), "the rolled-in worktree session is named on the repo's page");
+    assert.ok(!hubSessions.includes("sibcomp"), "a one-dash sibling project's sessions stay out");
+  } finally {
+    fs.rmSync(wtDir, { recursive: true, force: true });
+    fs.rmSync(sibDir, { recursive: true, force: true });
+  }
+});
+
 await check("a RUNNING task shows beside the tree lock even when the tree is free", async () => {
   const stPath = path.join(stateDir, "state.json");
   const seed = JSON.parse(fs.readFileSync(stPath, "utf8"));

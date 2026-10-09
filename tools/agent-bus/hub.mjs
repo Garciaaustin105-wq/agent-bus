@@ -2456,8 +2456,22 @@ function runDashboard(port) {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
         res.end(dashboardHtml(url.searchParams.get("flash"), proj));
       } catch (err) {
-        res.writeHead(500, { "content-type": "text/plain" });
-        res.end(String(err.message));
+        // A render throw used to die here for real: the catch re-wrote 500
+        // AFTER the 200's headers were already out (ERR_HTTP_HEADERS_SENT,
+        // uncaught) and took the whole hub down — every later request failed.
+        // Whatever made the render throw is on stderr; the client just
+        // keeps what it has.
+        process.stderr.write(`dashboard render threw:\n${err.stack || err}\n`);
+        try {
+          if (!res.headersSent) {
+            res.writeHead(500, { "content-type": "text/plain" });
+            res.end(String(err.message));
+          } else {
+            res.end();
+          }
+        } catch {
+          // the socket is already gone
+        }
       }
     });
     // Loopback only. This exposes who is working on what and where their

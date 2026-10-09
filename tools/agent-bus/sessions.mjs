@@ -31,6 +31,37 @@ export function sessionDirFor(root) {
 export const SESSION_DIR = sessionDirFor(PROJECT_ROOT);
 
 /**
+ * Worktree sessions belong to the repo they worked on, but Claude Code
+ * transcribes them under the WORKTREE root's own slug — so without a rollup
+ * the watch simply loses them (measured 2026-10-10: 202.6M re-read tokens,
+ * 10 labelled compactions, from one lowvoltage-app worktree, invisible on
+ * every panel). A worktree of <root> is always at <root>/.claude/worktrees/*,
+ * whose slug is the project's slug followed by `--` (the `/` and the leading
+ * `.` of `.claude` each become a dash). The double dash is the boundary that
+ * keeps REAL sibling projects out: `…-lowvoltage-app-onboard` sits one dash
+ * past `…-lowvoltage-app` and is a different app that must not be pulled in.
+ *
+ * The slug is lossy (every symbol became a dash), so this is a PREFIX rule,
+ * never a decode — and a dir is claimed by only one project per match. If
+ * someone registers a worktree path itself, both views claim its sessions
+ * and they count twice; the rule is stated so finding that out is cheap.
+ */
+export function sessionDirsFor(root) {
+  const main = sessionDirFor(root);
+  const slug = path.basename(main);
+  const projectsDir = path.dirname(main);
+  const out = [main];
+  try {
+    for (const name of fs.readdirSync(projectsDir)) {
+      if (name.startsWith(slug + "--")) out.push(path.join(projectsDir, name));
+    }
+  } catch {
+    // no ~/.claude/projects at all: the caller renders "no transcripts" (D3)
+  }
+  return out;
+}
+
+/**
  * Ninety minutes with no new turn and the session is over.
  *
  * Advice to compact a conversation nobody is in is noise, and noise is how a
@@ -59,24 +90,34 @@ const cachedByDir = new Map(); // dir -> { at, value }
  */
 export function readSessions({ force = false, ttlMs = TTL_MS, root = PROJECT_ROOT } = {}) {
   const now = Date.now();
-  const dir = sessionDirFor(root);
+  const dirs = sessionDirsFor(root);
+  const dir = dirs[0];
   const cached = cachedByDir.get(dir);
   if (!force && cached && now - cached.at < ttlMs) return cached.value;
 
-  let files;
-  try {
-    files = fs
-      .readdirSync(dir)
-      .filter((n) => n.endsWith(".jsonl"))
-      .map((n) => path.join(dir, n));
-  } catch {
+  const sessions = [];
+  const seen = new Set();
+  let missing = true;
+  const files = [];
+  for (const d of dirs) {
+    let listed;
+    try {
+      listed = fs
+        .readdirSync(d)
+        .filter((n) => n.endsWith(".jsonl"))
+        .map((n) => path.join(d, n));
+    } catch {
+      continue; // a dir that does not exist is a fact, not an error (D3)
+    }
+    missing = false;
+    files.push(...listed);
+  }
+  if (missing) {
     const empty = { rows: [], baseline: null, totals: null, missing: true, dir };
     cachedByDir.set(dir, { at: now, value: empty });
     return empty;
   }
 
-  const sessions = [];
-  const seen = new Set();
   for (const file of files) {
     let st;
     try {
