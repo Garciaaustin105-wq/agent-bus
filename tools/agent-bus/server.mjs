@@ -42,6 +42,7 @@ import { cutoffWhy, ollamaOptions } from "./runner-limits.mjs";
 import { renderHealth } from "./health.mjs";
 import { buildIssueUrl, buildLesson, fetchFeed, renderFeed } from "./lessons.mjs";
 import { assertLoopback, buildRunnerDrafts, discoverLocal, renderDiscover } from "./discover.mjs";
+import { refuseBusSelfEdit } from "./edits.mjs";
 import {
   blockAnnounce,
   blockMessage,
@@ -454,6 +455,36 @@ const handoffKeyOf = (args) => {
   const key = String(args?.key || "handoff").trim() || "handoff";
   return assertKey(key);
 };
+
+/* ── the worktree verb ─────────────────────────────────────────────────────
+ * docs/worktree-verb.md. The lane's recurring FIRST MOVE — git worktree add,
+ * claim_tree, handoff_take — as one call. Each step stays the same tool it
+ * composes (callTool("claim_tree"), callTool("handoff_take")); nothing is
+ * forked. Every slug and ref is validated here and every git call is a fixed
+ * argv through spawnSync, never a shell. Same module-scope rule as the
+ * handoff helpers above: no const between two cases. */
+const WORKTREE_SLUG = /^[a-z0-9][a-z0-9._-]{0,48}$/i;
+const WORKTREE_REF = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,79}$/;
+const worktreeRefOk = (ref) =>
+  WORKTREE_REF.test(ref) && !ref.includes("..") && !ref.endsWith(".lock") && !ref.startsWith("refs/");
+const gitRun = (args, cwd) => spawnSync("git", args, { cwd, encoding: "utf8" });
+// The trees' home: Claude Code's `.claude/` convention when the project has
+// one, a plain sibling directory when it does not (the bus serves non-Claude
+// fleets, which should not acquire a .claude dir by side effect).
+const worktreeBaseDir = (root) =>
+  fs.existsSync(path.join(root, ".claude"))
+    ? path.join(root, ".claude", "worktrees")
+    : path.join(root, "agent-bus-worktrees");
+// Base ref: --from first; then what clones record (origin/HEAD), else the two
+// common defaults — each ACTUALLY resolved, never assumed — then HEAD, so a
+// repo with no remote still branches. The result is printed in the reply.
+const worktreeBaseRef = (root, from) => {
+  if (from) return from;
+  for (const ref of ["origin/HEAD", "origin/main", "origin/master"]) {
+    if (gitRun(["rev-parse", "--verify", "--quiet", ref], root).status === 0) return ref;
+  }
+  return "HEAD";
+};
 // List fields accept the loose shapes a hurried writer actually sends: plain
 // strings become {title} items or pointer lines. An absent field is an empty
 // list — that is normal (most handoffs have no constraints) — but an unusable
@@ -674,6 +705,23 @@ const TOOLS = [
     name: "release_tree",
     description: "Give back a working-tree claim as soon as you are done. Do not hold it while idle.",
     inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "worktree",
+    description:
+      "One call for a lane's first move: create a git worktree for <name> (branch bus/<name> by default, --branch for the fleet's own habit), claim it on the bus, and — when the board holds exactly ONE handoff — take it. Two or more handoffs are never guessed between; nothing auto-removes a tree. The reply names the tree, branch, claim and taken handoff together.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Leaf slug (letters, digits, . _ -). The tree lands under the project's .claude/worktrees/, or agent-bus-worktrees/ when there is no .claude." },
+        from: { type: "string", description: "Base ref. Default: origin/HEAD, else origin/main, else origin/master, else HEAD." },
+        branch: { type: "string", description: "Branch name. Default: bus/<name>." },
+        handoff: { type: "string", description: "Pick a specific handoff key when several are on the board." },
+        no_handoff: { type: "boolean", description: "Set true to skip the handoff step entirely." },
+        minutes: { type: "number", description: "Claim length; default 30, max 240." },
+      },
+      required: ["name"],
+    },
   },
   {
     name: "send",
@@ -1097,6 +1145,100 @@ function callTool(name, args) {
         state.lock = null;
         return `Released ${was}.`;
       });
+
+    case "worktree": {
+      // docs/worktree-verb.md. Refusals first — nothing runs until every
+      // argument is well-formed.
+      const name = String(args.name || "").trim();
+      const from = args.from ? String(args.from).trim() : null;
+      const branch = String(args.branch || "").trim() || `bus/${name}`;
+      const wantKey = args.handoff ? String(args.handoff).trim() : null;
+      const skipHandoff = Boolean(args.no_handoff);
+      const minutes = Math.min(240, Math.max(1, Number(args.minutes) || 30));
+      requireName();
+      if (!WORKTREE_SLUG.test(name)) {
+        throw new Error(
+          `"${name}" is not a leaf slug (letters, digits, . _ -, at most 49 chars) — the name is a leaf; the bus owns the directory above it.`
+        );
+      }
+      if (!worktreeRefOk(branch)) {
+        throw new Error(
+          `"${branch}" is not a branch name the verb accepts: no spaces, no leading dash, no "..", no ".lock" ending, no refs/ prefix.`
+        );
+      }
+      if (from && !worktreeRefOk(from)) throw new Error(`"${from}" is not a ref the worktree verb accepts (same rule as a branch).`);
+      const root = PROJECT_ROOT;
+      if (!fs.existsSync(path.join(root, ".git"))) {
+        throw new Error("Not a git repository — the worktree verb has nothing to branch. The bus still works here; trees do not.");
+      }
+      const treePath = path.join(worktreeBaseDir(root), name);
+      const guarded = refuseBusSelfEdit(treePath, import.meta.dirname);
+      if (guarded) throw new Error(guarded);
+      if (fs.existsSync(treePath)) {
+        throw new Error(`${treePath} already exists — if it is yours, claim it (claim_tree) and work there; no second tree is made.`);
+      }
+      const baseRef = worktreeBaseRef(root, from);
+      const added = gitRun(["worktree", "add", "-b", branch, treePath, baseRef], root);
+      if (added.status !== 0) {
+        // git's own stderr, verbatim — the usual case is a name that already
+        // exists as a branch, and git's message says so better than ours.
+        throw new Error(`git worktree add failed: ${(added.stderr || added.error?.message || "unknown").trim()}`);
+      }
+      // Claim. A live claim elsewhere on the bus is a refusal, not a take —
+      // but the tree is real now, so that outcome is stated, never hidden
+      // (docs/worktree-verb.md: the one created-but-unclaimed case). The claim
+      // targets the NEW path, so another tree's claim does not collide here;
+      // withState's one-lock-per-bus does.
+      let claimOut;
+      try {
+        claimOut = callTool("claim_tree", { path: treePath, reason: `worktree ${name}`, minutes });
+      } catch (err) {
+        claimOut = `The tree was created but is NOT claimed — ${err.message}`;
+      }
+      // Handoff. Exactly one on the board is taken deterministically; more
+      // than one is never guessed between — the pick is the taker's.
+      let handoffOut;
+      if (skipHandoff) {
+        handoffOut = "No handoff taken (--no-handoff).";
+      } else if (wantKey) {
+        try {
+          handoffOut = callTool("handoff_take", { key: wantKey });
+        } catch (err) {
+          handoffOut = `Handoff not taken — ${err.message}`;
+        }
+      } else {
+        // Untaken handoffs only, for the deterministic pick — one already
+        // taken by a previous taker stays on the board until superseded, and
+        // silently appending to its chain would be a guess. An explicit
+        // --handoff can still take it (the chain is the audit).
+        const keys = withState((state) =>
+          Object.values(state.board || {})
+            .filter((e) => e && e.kind === "handoff" && (e.taken?.length ?? 0) === 0)
+            .map((e) => e.key)
+        );
+        if (keys.length === 0) {
+          handoffOut = "No unclaimed handoff on the board to take.";
+        } else if (keys.length > 1) {
+          handoffOut = `More than one handoff on the board — none auto-taken. Pick one with --handoff:\n${keys.join("\n")}`;
+        } else {
+          try {
+            handoffOut = callTool("handoff_take", { key: keys[0] });
+          } catch (err) {
+            handoffOut = `Handoff not taken — ${err.message}`;
+          }
+        }
+      }
+      return [
+        claimOut,
+        "",
+        `tree:    ${treePath}`,
+        `branch:  ${branch} (from ${baseRef})`,
+        "",
+        handoffOut,
+        "",
+        "Removing the tree is a person's `git worktree remove` — the bus never deletes.",
+      ].join("\n");
+    }
 
     case "send": {
       const to = String(args.to || "").trim();
@@ -2893,6 +3035,27 @@ function runCli(argv) {
         myName = rest[0];
         return say(callTool("release_tree", {}));
       }
+      case "worktree": {
+        // docs/worktree-verb.md — tree + claim + handoff in one call. Flags
+        // consume their values, index-parsed like --stage; filtering them
+        // out wholesale leaked a flag's VALUE into the positionals once and
+        // ran live (the bench --judge lesson).
+        const opts = {};
+        const words = [];
+        for (let i = 0; i < rest0.length; i++) {
+          const f = rest0[i];
+          if (f === "--from") opts.from = rest0[++i];
+          else if (f === "--branch") opts.branch = rest0[++i];
+          else if (f === "--handoff") opts.handoff = rest0[++i];
+          else if (f === "--minutes") opts.minutes = Number(rest0[++i]);
+          else if (f === "--no-handoff") opts.no_handoff = true;
+          else words.push(f);
+        }
+        myName = process.env.AGENT_BUS_NAME || "cli";
+        registerCli(myName);
+        opts.name = words[0];
+        return say(callTool("worktree", opts));
+      }
       // Opt-in sharing with other installs. NOTHING is sent: the note is
       // scrubbed to problem-shape locally, the draft is printed, and the human
       // decides — by opening a prefilled issue URL — whether this machine's
@@ -3014,6 +3177,8 @@ function printHelp(say) {
   say("  projects | project_add <name> <root> | project_remove <name>");
   say("                      the app spaces this bus serves (hub Spaces bar)");
   say("  open [port]         the dashboard, plus its own chromeless window");
+  say("  worktree <name> [--from ref] [--branch b] [--handoff key] [--no-handoff]");
+  say("                      a lane's first move in one call: tree + claim + the handoff");
   say("  init [--project <root>]");
   say("                      register the project in its .mcp.json (merge, never clobber)");
   say("  mcp                 force the stdio MCP server (the no-argument behavior, named)");

@@ -232,6 +232,7 @@ watch at another repo's transcripts.
 ```
 node tools/agent-bus/e2e-agent-bus.mjs          72 assertions, two real processes
 node tools/agent-bus/handoff-harness.mjs        17 — handoff + handoff_take (supersede, history cap, taken chain)
+node tools/agent-bus/worktree-harness.mjs       13 — the worktree verb: tree + claim + handoff in one call (real git fixture)
 node tools/agent-bus/agent-harness.mjs          33 — the hub agent's matching and dispatch
 node tools/agent-bus/steward-harness.mjs        40 — the steward's four duties, against a fake classifier
 node tools/agent-bus/token-watch-harness.mjs    53 — the context arithmetic

@@ -66,6 +66,11 @@ Two behavioural guarantees the harnesses pin, in one line each:
   notes and task prompts are untrusted data, and "update the bus to fix X" is
   exactly the instruction such data would carry. (`AGENT_BUS_ALLOW_SELF_EDIT=1`
   is the maintainer's explicit override, not a default.)
+- **The `worktree` verb runs `git worktree add` in the caller's own repo.**
+  That command runs the repo's own checkout hooks — equally true of every
+  manual `git worktree add` this fleet has ever run, and the verb only ever
+  acts on the repo its caller is already working in. The boundary stays
+  "trust the repo you are in"; it is now stated, not implicit.
 
 ## Why the dependency count matters
 

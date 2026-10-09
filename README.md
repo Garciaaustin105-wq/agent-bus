@@ -242,6 +242,7 @@ renders the same way. Both are unset here.
 ```sh
 node tools/agent-bus/e2e-agent-bus.mjs        # 72 — stdio end to end, temp dirs only
 node tools/agent-bus/handoff-harness.mjs      # 17 — handoff + handoff_take: supersede, history cap, taken chain
+node tools/agent-bus/worktree-harness.mjs     # 13 — the worktree verb: tree + claim + handoff in one call, real git fixture
 node tools/agent-bus/agent-harness.mjs        # 33 — hub-agent dispatch rules
 node tools/agent-bus/edits-harness.mjs        # 32 — edit-protocol failure modes + the self-edit guard
 node tools/agent-bus/lessons-harness.mjs      # 23 — the cross-install learning seam
@@ -260,7 +261,7 @@ node tools/agent-bus/recall-harness.mjs       # 46 — note history + history()/
 node tools/agent-bus/npm-pack-harness.mjs     # 9  — the npm package contract: zero deps, bin shebang, version parity, pack→install→state-lands-in-the-project (skipped with a reason where npm is absent)
 ```
 
-496 checks in total. All suites use temp dirs and never touch real state.
+509 checks in total. All suites use temp dirs and never touch real state.
 
 ## Learning across installs
 

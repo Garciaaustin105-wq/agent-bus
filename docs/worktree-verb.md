@@ -30,7 +30,10 @@ CLI: `node tools/agent-bus/server.mjs worktree ...`; MCP tool `worktree`
 4. **Takes the handoff.** Exactly one handoff on the board → taken
    (deterministic; no guess). Two or more → none taken, the keys are listed
    and `--handoff <key>` picks one next call. Zero → fine, nothing to take,
-   said plainly. `--no-handoff` opts out entirely. The taken chain — every
+   said plainly (an already-TAKEN handoff does not count for the deterministic
+   match — silently appending to a chain a previous taker started would be a
+   guess; an explicit `--handoff` may still take it). `--no-handoff` opts out
+   entirely. The taken chain — every
    earlier taker visible in the reply — is the whole audit, unchanged.
 
 ## Refusals (each before any git is run, except where noted)
