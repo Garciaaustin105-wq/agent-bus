@@ -32,7 +32,6 @@
 // needs and knows nothing else about it.
 
 import fs from "node:fs";
-import net from "node:net";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -2662,56 +2661,55 @@ function runCli(argv) {
           return;
         }
       case "open": {
-        // packaging.md item 3, as a verb: the port is chosen by BINDING to 0
-        // and reading .address().port — the .cmd's netstat grep is retired,
-        // not ported. Then: start the hub (its own one-hub rule handles
-        // "already running") but only open the window once the port actually
-        // ANSWERS — a window pointed at a hub that has not bound yet lands
-        // on the browser's own error page, where our auto-refresh is not,
-        // so it would never recover (the lesson the .cmd's :wait loop
-        // already paid for).
-        const fixed = rest0.length ? Number(rest0[0]) : NaN;
-        const hubPath = path.join(import.meta.dirname, "hub.mjs");
-        const url = (p) => `http://127.0.0.1:${p}`;
-        // One HTTP GET with a retry budget. No dependency: http from node.
-        const waitUp = (port, budgetMs, cb) => {
-          const start = Date.now();
-          const tryOnce = () => {
-            const req = http.get({ host: "127.0.0.1", port, path: "/" }, (res) => {
-              res.resume();
-              cb(true);
-            });
-            req.on("error", () => {
-              if (Date.now() - start > budgetMs) return cb(false);
-              setTimeout(tryOnce, 500);
-            });
-          };
-          tryOnce();
+        // packaging.md item 2, as a verb. ONE HUB FIRST (the v0.1.2 twin-hub
+        // rule): the target port — the argument, else 7777 like hub.mjs — is
+        // PROBED before anything is spawned; a hub already answering there
+        // (hub.mjs stamps every render with the hub-render marker, which is
+        // the identity check) just gets a second window opened at it, and
+        // the browser's own error-page case — a window pointed at a hub
+        // that has not bound yet, where our 4s watcher is not and never
+        // recovers — is avoided by opening the window only AFTER the port
+        // answers. The port never comes from a bind-to-0 pick: a fresh free
+        // port cannot see the running hub anywhere (a per-port check is the
+        // only check), which is exactly the twin this verb could spawn.
+        const arg = rest0.length ? Number(rest0[0]) : NaN;
+        const port = Number.isInteger(arg) && arg > 0 && arg <= 65535 ? arg : 7777;
+        const url = `http://127.0.0.1:${port}`;
+        const hubUp = (cb) => {
+          const req = http.get({ host: "127.0.0.1", port, path: "/" }, (res) => {
+            res.setEncoding("utf8");
+            let seen = "";
+            const done = (yes) => { res.destroy(); cb(yes); };
+            res.on("data", (c) => { seen += c; if (seen.includes('name="hub-render"')) done(true); });
+            res.on("end", () => cb(seen.includes('name="hub-render"')));
+          });
+          req.setTimeout(2000, () => req.destroy());
+          req.on("error", () => cb(false));
         };
-        const startHub = (port) => {
+        hubUp((already) => {
+          if (already) {
+            say(`agent-bus is already running at ${url} — one bus, one steward; pointing a window at it.`);
+            openAppWindow(say, url);
+            return;
+          }
+          say(`starting dashboard on ${url}...`);
           const child = spawn(
             process.execPath,
-            [hubPath, String(port)],
+            [path.join(import.meta.dirname, "hub.mjs"), String(port)],
             { stdio: "inherit" }
           );
           child.on("exit", (code) => { process.exitCode = code ?? 0; });
-          waitUp(port, 15000, (up) => {
-            if (!up) {
-              say(`hub did not answer on ${url(port)} within 15s — see its output above`);
-              return;
-            }
-            openAppWindow(say, url(port));
-          });
-        };
-        if (Number.isInteger(fixed) && fixed > 0 && fixed <= 65535) startHub(fixed);
-        else {
-          // Packaging.md: bind to 0, read the port, not a netstat grep.
-          const probe = net.createServer();
-          probe.listen(0, "127.0.0.1", () => {
-            const free = probe.address().port;
-            probe.close(() => startHub(free));
-          });
-        }
+          // The port must actually ANSWER before a window points at it.
+          const start = Date.now();
+          const tryOnce = () => {
+            hubUp((up) => {
+              if (up) openAppWindow(say, url);
+              else if (Date.now() - start < 15000) setTimeout(tryOnce, 500);
+              else say(`hub did not answer on ${url} within 15s — see its output above`);
+            });
+          };
+          tryOnce();
+        });
         return;
       }
       case "init": {

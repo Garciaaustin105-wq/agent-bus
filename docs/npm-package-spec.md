@@ -62,8 +62,12 @@ Replaces the ~40 lines of `agent-bus.cmd` with a `dashboard_open` CLI verb
 (`node tools/agent-bus/server.mjs open [port]`), and `.cmd` shells out to it
 (one line) instead of carrying its own copy.
 
-- **Port**: bind to 0 and read `server.address().port` — never grep `netstat`.
-  The chosen port is printed so a headless caller can use it.
+- **Port**: the argument, else 7777 like hub.mjs — probed over HTTP with the
+  hub-render identity check, `netstat` never. One hub first (the v0.1.2 rule):
+  a hub already answering on the target just gets a second window; nothing is
+  spawned. (Not a bind-to-0 pick — a fresh free port cannot see the running
+  hub anywhere, since "already running" is necessarily a per-port check; the
+  first dogfooded run spawned exactly that twin. Miss `miss-claim-open-s-bind-to-0`.)
 - **Window**: pick a chrome-family binary in this order (first found wins):
   Windows `%ProgramFiles%/Google/Chrome/Application/chrome.exe` then
   `%ProgramFiles(x86)%` then Edge (`msedge.exe`);
