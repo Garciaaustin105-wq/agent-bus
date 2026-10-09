@@ -98,6 +98,8 @@ function stateFor(proj) {
 // render; a space with no bus yet reads as quiet, not broken.
 function healthOf(state) {
   const tasks = state.tasks ?? [];
+  const finished = tasks.filter((t) => t.status === "done" || t.status === "failed");
+  const failed = finished.filter((t) => t.status === "failed").length;
   const last = [
     ...tasks.map((t) => t.doneAt || t.startedAt || t.at),
     ...(state.messages ?? []).map((m) => m.at),
@@ -113,6 +115,13 @@ function healthOf(state) {
     reviewDebt: tasks.filter((t) => t.status === "done" && !(t.reviews ?? []).length).length,
     blocked: (state.blocks ?? []).filter((b) => b.status === "open").length,
     last,
+    // docs/monitoring.md — the two numbers the brainstorm asked for, per
+    // app: the failure rate over the retained record and how long since
+    // anything shipped. Both null when there is nothing to divide over or
+    // no publish on record — a quiet space shows what it always showed,
+    // never a 0% computed over nothing.
+    failRate: finished.length ? failed / finished.length : null,
+    lastShip: (state.publishes ?? []).at(-1) ?? null,
   };
 }
 
@@ -143,8 +152,12 @@ const healthStr = (h) =>
         `${h.queued} queued`,
         `${h.running} running`,
         `${h.reviewDebt} awaiting review`,
+        h.failRate != null && h.failed ? `${Math.round(h.failRate * 100)}% fail` : null,
         h.failed ? `${h.failed} failed` : null,
         h.blocked ? `${h.blocked} blocked` : null,
+        // Days since the newest publish — the ship-age observance from
+        // docs/monitoring.md, one number beside the rate.
+        h.lastShip ? `ship ${(Math.max(0, Date.now() - Date.parse(h.lastShip.at)) / 86400000).toFixed(0)}d` : null,
         h.last ? `last ${agoStr(h.last)}` : null,
       ]
         .filter(Boolean)

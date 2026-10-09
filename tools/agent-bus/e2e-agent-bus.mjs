@@ -71,8 +71,8 @@ t("initialize returns a protocol version", !!init.result?.protocolVersion, JSON.
 t("...and identifies the server", init.result?.serverInfo?.name === "agent-bus");
 await b.rpc("initialize", {});
 const list = await a.rpc("tools/list", {});
-t("tools/list returns the tool set — including the review, apply, worktree and edit surfaces",
-  (list.result?.tools?.length ?? 0) === 30,
+t("tools/list returns the tool set — including the review, apply, worktree, edit and monitor surfaces",
+  (list.result?.tools?.length ?? 0) === 31,
   `got ${list.result?.tools?.length}`);
 t("every tool declares an input schema",
   list.result.tools.every((x) => x.inputSchema && x.inputSchema.type === "object"));
@@ -313,6 +313,53 @@ hubOnce();
 t("a status question gets the bus state back",
   namedCli("runner2", "inbox", "runner2").includes("HUB STATUS"));
 t("an empty poll is quiet", hubOnce().includes("(quiet)"));
+
+// CARETAKER x MONITOR — the new finding kinds go through the same
+// file/dedupe/clear machinery as health's. The seeded space: a claim held
+// days under a runner who IS registered (so it routes, §6), busy finished
+// work, and a publish record that has never had an entry.
+const caretStateFile = fs.existsSync(path.join(proj2, ".git"))
+  ? path.join(proj2, ".git", "agent-bus", "state.json")
+  : path.join(proj2, ".agent-bus", "state.json");
+const caretAgo = (d) => new Date(Date.now() - d * 86400000).toISOString();
+{
+  const prior = fs.existsSync(caretStateFile) ? fs.readFileSync(caretStateFile, "utf8") : null;
+  const cs = prior ? JSON.parse(prior) : {};
+  cs.taskSeq = Math.max(cs.taskSeq ?? 0, 9);
+  cs.tasks = (cs.tasks ?? []).filter((x) => x.status === "queued").concat([
+    { id: "tk1", lane: "local", title: "won", prompt: "p", status: "done", runner: "runner2",
+      startedAt: caretAgo(2), doneAt: caretAgo(2), by: "desk", at: caretAgo(2), result: "ok" },
+    { id: "tk2", lane: "local", title: "won", prompt: "p", status: "done", runner: "runner2",
+      startedAt: caretAgo(1), doneAt: caretAgo(1), by: "desk", at: caretAgo(1), result: "ok" },
+    { id: "tk3", lane: "local", title: "won", prompt: "p", status: "done", runner: "runner2",
+      startedAt: caretAgo(0.8), doneAt: caretAgo(0.8), by: "desk", at: caretAgo(0.8), result: "ok" },
+    { id: "tk4", lane: "local", title: "won", prompt: "p", status: "done", runner: "runner2",
+      startedAt: caretAgo(0.6), doneAt: caretAgo(0.6), by: "desk", at: caretAgo(0.6), result: "ok" },
+    { id: "tk5", lane: "local", title: "won", prompt: "p", status: "done", runner: "runner2",
+      startedAt: caretAgo(0.4), doneAt: caretAgo(0.4), by: "desk", at: caretAgo(0.4), result: "ok" },
+    { id: "tk9", lane: "local", title: "held", prompt: "p", status: "running", runner: "runner2",
+      startedAt: caretAgo(6), by: "desk", at: caretAgo(6) },
+  ]);
+  fs.writeFileSync(caretStateFile, JSON.stringify(cs, null, 2));
+}
+const caretLog = hubOnce();
+t("the caretaker files the new kinds itself",
+  caretLog.includes("caretaker filed caretaker-long-running-tk9") &&
+  caretLog.includes("caretaker filed caretaker-no-ship-none"), caretLog);
+t("...a long-running task routes to its REGISTERED runner's inbox",
+  namedCli("runner2", "inbox", "runner2").includes("CARETAKER"), caretLog);
+t("...the board note is the durable record", namedCli("glm", "board").includes("caretaker-long-running-tk9"));
+// The publish lands and the claim ends: both findings clear through the same
+// machinery, and the cleared notes are the resolutions on record.
+const done = JSON.parse(fs.readFileSync(caretStateFile, "utf8"));
+done.tasks.find((x) => x.id === "tk9").status = "done";
+done.tasks.find((x) => x.id === "tk9").doneAt = caretAgo(0.1);
+done.publishes = [{ version: "v2.0.0", what: "shipped", by: "desk", at: caretAgo(0.05) }];
+fs.writeFileSync(caretStateFile, JSON.stringify(done, null, 2));
+const clearedLog = hubOnce();
+t("...and both clear themselves, on the record",
+  clearedLog.includes("cleared") && namedCli("glm", "board").includes("Cleared —"), clearedLog);
+
 fs.rmSync(proj2, { recursive: true, force: true });
 
 console.log("\n[apply — a draft brief becomes work]");
@@ -404,6 +451,72 @@ for (let i = 0; i < 6; i++) {
 t("the task keeps the FIVE newest artifacts", artifactsOf().length === 5 && artifactsOf()[0].edits[0].replace.includes("const a = 101;"));
 t("a fleet that never calls edit behaves identically — no state shape change beyond task.artifacts",
   fs.existsSync(homeState));
+
+console.log("\n[monitor — the rate, the stuck tasks, the ship age]");
+// Seeded the way failures actually land: some lost tasks under a runner that
+// keeps them, done work nobody ever reviewed, a claim held days under a
+// runner who is ALIVE (health's stale-runner sees nothing here; the monitor
+// contract is the one that does), and no publish on record at all.
+const seedM = JSON.parse(fs.readFileSync(homeState, "utf8"));
+seedM.taskSeq = Math.max(seedM.taskSeq ?? 0, 210);
+const daysAgo = (d) => new Date(Date.now() - d * 86400000).toISOString();
+seedM.tasks.push(
+  { id: "t211", lane: "fixes", title: "lost", prompt: "p", status: "failed", runner: "failed-worker",
+    startedAt: daysAgo(0.1), doneAt: daysAgo(0), by: "desk", at: daysAgo(0.2), result: "boom" },
+  { id: "t212", lane: "fixes", title: "won", prompt: "p", status: "done", runner: "failed-worker",
+    startedAt: daysAgo(0.2), doneAt: daysAgo(0.1), by: "desk", at: daysAgo(0.3), result: "ok" },
+  { id: "t213", lane: "fixes", title: "old", prompt: "p", status: "done", runner: "steady-worker",
+    startedAt: daysAgo(9), doneAt: daysAgo(8), by: "desk", at: daysAgo(9), result: "ok" },
+  { id: "t214", lane: "fixes", title: "won", prompt: "p", status: "done", runner: "steady-worker",
+    startedAt: daysAgo(0.4), doneAt: daysAgo(0.3), by: "desk", at: daysAgo(0.5), result: "ok" },
+  { id: "t215", lane: "fixes", title: "won", prompt: "p", status: "done", runner: "steady-worker",
+    startedAt: daysAgo(0.6), doneAt: daysAgo(0.5), by: "desk", at: daysAgo(0.7), result: "ok" },
+  { id: "t216", lane: "fixes", title: "held forever", prompt: "p", status: "running", runner: "lane-d",
+    startedAt: daysAgo(5), by: "desk", at: daysAgo(5) },
+);
+fs.writeFileSync(homeState, JSON.stringify(seedM, null, 2));
+const mon = await a.call("monitor", {});
+t("monitor reports the rate WITH its window", !mon.isError && /finished over the last .* days/.test(mon.text), mon.text);
+t("...the overall split", mon.text.includes("1 failed"), mon.text);
+t("...and the per-runner ledger", mon.text.includes("failed-worker"), mon.text);
+t("...long-running: a claim held 5d past the lane's median", /LONG-RUNNING — task t216/.test(mon.text), mon.text);
+t("...unreviewed-done for the 8-day-old win with no review", /UNREVIEWED-DONE — task t213/.test(mon.text), mon.text);
+t("...no-ship: busy without ever publishing", /NO-SHIP — no publish ever recorded/.test(mon.text), mon.text);
+
+console.log("\n[monitor, per app — a cross-space read]");
+// One registry entry, its own state, its own publish record. The monitor
+// reads numbers across spaces; it must not WRITE across them.
+const widget = fs.mkdtempSync(path.join(os.tmpdir(), "agent-bus-widget-"));
+fs.mkdirSync(path.join(widget, ".agent-bus"), { recursive: true });
+const widgetState = path.join(widget, ".agent-bus", "state.json");
+const widgetSeed = {
+  board: {}, agents: {}, messages: [], blocks: [], taskSeq: 3,
+  tasks: [
+    { id: "w1", lane: "local", title: "won", prompt: "p", status: "done", runner: "w-runner",
+      startedAt: daysAgo(2), doneAt: daysAgo(1), by: "desk", at: daysAgo(2), result: "ok" },
+    { id: "w2", lane: "local", title: "lost", prompt: "p", status: "failed", runner: "w-runner",
+      startedAt: daysAgo(4), doneAt: daysAgo(3), by: "desk", at: daysAgo(4), result: "boom" },
+  ],
+  publishes: [{ version: "v1.0.0", what: "first ship", by: "desk", at: daysAgo(1) }],
+};
+fs.writeFileSync(widgetState, JSON.stringify(widgetSeed, null, 2));
+const beforeWidget = fs.readFileSync(widgetState, "utf8");
+await a.call("project_add", { name: "widget", root: widget });
+const across = await a.call("monitor", { space: "widget" });
+t("monitor reads a registered app's numbers", !across.isError && across.text.includes("w-runner"), across.text);
+t("...and its fresh publish record means NO ship-age finding",
+  !across.text.includes("NO-SHIP"), across.text);
+t("...and the read left the other space's state untouched",
+  fs.readFileSync(widgetState, "utf8") === beforeWidget);
+const unknownSpace = await a.call("monitor", { space: "nowhere" });
+t("an unknown space is refused, with the registry named",
+  unknownSpace.isError && unknownSpace.text.includes("No registered app space"), unknownSpace.text);
+const cliMonitor = cli("monitor");
+t("the CLI answers the same contract from a shell",
+  cliMonitor.includes("failed-worker") && cliMonitor.includes("finished"), cliMonitor);
+fs.rmSync(widget, { recursive: true, force: true });
+
+console.log("\n[caretaker, monitor edition — stuck + busy-but-never-shipping]");
 
 console.log("\n[bad input never takes the server down]");
 t("unknown tool errors without dying", (await a.call("no_such_tool")).isError);

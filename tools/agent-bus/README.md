@@ -230,9 +230,10 @@ watch at another repo's transcripts.
 ## Tests
 
 ```
-node tools/agent-bus/e2e-agent-bus.mjs          85 assertions, two real processes
+node tools/agent-bus/e2e-agent-bus.mjs          100 assertions, two real processes
 node tools/agent-bus/handoff-harness.mjs        17 — handoff + handoff_take (supersede, history cap, taken chain)
 node tools/agent-bus/worktree-harness.mjs       13 — the worktree verb: tree + claim + handoff in one call (real git fixture)
+node tools/agent-bus/monitor-harness.mjs        13 — the monitor contract: fail rate per runner, stuck tasks, ship age (pure)
 node tools/agent-bus/agent-harness.mjs          33 — the hub agent's matching and dispatch
 node tools/agent-bus/steward-harness.mjs        40 — the steward's four duties, against a fake classifier
 node tools/agent-bus/token-watch-harness.mjs    53 — the context arithmetic
@@ -243,8 +244,9 @@ node tools/agent-bus/blockers-harness.mjs       24 — blocker matching + the fi
 node tools/agent-bus/routing-harness.mjs        30 — runner routing from the fleet's own record
 node tools/agent-bus/runner-limits-harness.mjs  16 — per-runner output budgets
 node tools/agent-bus/worker-tasks-harness.mjs   12 — the task queue's state layer + state-growth caps
-node tools/agent-bus/hub-http-harness.mjs       33 — the dashboard.s HTTP edge + app spaces + docs panels + the draft-batch surface
+node tools/agent-bus/hub-http-harness.mjs       34 — the dashboard.s HTTP edge + app spaces + docs panels + the draft-batch surface + the monitor strip
 node tools/agent-bus/projects-harness.mjs       14 — the app-space registry + cross-space reads
+node tools/agent-bus/monitor-harness.mjs        13 — the monitor contract (see the Verifying table)
 node tools/agent-bus/bench-harness.mjs          23 — the bench contract: never deletes, hardware-gated
 node tools/agent-bus/lock-harness.mjs           9  — the state lock's staleness and identity
 node tools/agent-bus/recall-harness.mjs         46 — note history + history()/search + the health contract + depends_on + the caretaker, routes to owners

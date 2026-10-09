@@ -75,9 +75,9 @@ one table:
   that keeps finishing tasks while nothing ever ships is. Publishing stays
   user-gated everywhere (npm, deploys, releases) — the finding is an
   observance, never a nudge, exactly as brainstormed: it files and stops,
-  and its subject is stable (`no-ship:<last publish version>` or
-  `no-ship:none` where the space has never published) so clearing works when
-  the publish lands.
+  and its subject is stable (the version the finding dates from, or `none`
+  where the space has never published) so clearing works when the publish
+  lands.
 
 Every finding is `{ kind, subject, detail }` — same shape as health's, same
 render, same caretaker machinery. `long-running` routes to the task's runner

@@ -521,6 +521,19 @@ await check("the health strip computes per space, from that space's own state", 
   assert.ok(projHtml.includes("Pulse: 1 queued"), "proj-a's strip counts ITS queued task");
 });
 
+await check("the space strip carries the monitor numbers — fail rate and ship age", async () => {
+  // The hub space has a failed task (t3) and a publish on record (v0.1.0) —
+  // both numbers live. A space with neither shows neither: no 0% over
+  // nothing, no ship age over no record (docs/monitoring.md).
+  const hubHtml = await (await GET(`${base}/`)).text();
+  const strip = hubHtml.match(/Pulse:[^<]+/)?.[0] ?? "";
+  assert.ok(hubHtml.includes("50% fail"), `fail rate on the strip: ${strip}`);
+  assert.ok(hubHtml.includes("ship 0d"), `ship age on the strip: ${strip}`);
+  const projHtml = await (await GET(`${base}/?p=proj-a`)).text();
+  assert.ok(!/ship \d+d/.test(projHtml), "no ship age computed over no record");
+  assert.ok(!projHtml.includes("% fail"), "no fail rate computed over nothing");
+});
+
 await check("a done task carries a review form; a review lands; the self-review is refused", async () => {
   const q = await fetch(`${base}/`, {
     method: "POST", redirect: "manual",

@@ -78,9 +78,11 @@ import {
   cleanRoot,
   readRegistry,
   removeProject,
+  resolveProject,
   statePathForRoot,
   writeRegistry,
 } from "./projects.mjs";
+import { renderMonitor } from "./monitor.mjs";
 
 // Version from package.json when it sits two levels up (the repo / the
 // npm-installed package both have it there); the fallback keeps a bare-clone
@@ -864,6 +866,17 @@ const TOOLS = [
     description:
       "Is this space decaying? Runs the shared contract: runners silent while a task says running, queues nobody is picking up, drafts waiting on a human apply, handoffs with an empty taken chain, blocks standing OPEN. Clean runs name everything they checked.",
     inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "monitor",
+    description:
+      "How is this queue actually doing? The failure rate over the retained record (overall and per runner), plus findings beyond health's static checks: a task stuck under a live runner, done-but-unreviewed work, and a space busy without shipping. Read-only; pass `space` (a registered name) to read another app's numbers.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        space: { type: "string", description: "Optional — a registered app-space name; read THAT space's monitor read-only instead of this one's." },
+      },
+    },
   },
   {
     name: "ping",
@@ -1899,6 +1912,29 @@ function callTool(name, args) {
         touch(state);
         return renderHealth(state);
       });
+
+    case "monitor": {
+      // The spine's monitor stage, on demand. A cross-space read is a
+      // read-only read of a registered app's state file — the same read the
+      // hub's Spaces bar does every refresh — so no lock and no write is
+      // taken: the verb reports on a space, it never becomes one.
+      const space = args.space != null ? String(args.space).trim().toLowerCase() : "";
+      if (space) {
+        const proj = resolveProject(readRegistry(DIR), space, PROJECT_ROOT);
+        if (!proj || proj.own) {
+          throw new Error(
+            `No registered app space named "${space}". The registry: ` +
+              (readRegistry(DIR).map((e) => e.name).join(", ") || "(empty)"),
+          );
+        }
+        return renderMonitor(readStateForRoot(proj.root) ?? {});
+      }
+      return withState((state) => {
+        pruneAgents(state);
+        touch(state);
+        return renderMonitor(state);
+      });
+    }
 
     case "status":
       return withState((state) => {
@@ -3096,6 +3132,11 @@ function runCli(argv) {
       // runs every poll, on demand.
       case "health":
         return say(callTool("health", {}));
+      // The spine's Monitor stage from a shell — the rate over the retained
+      // record plus the stuck-task / review-debt / ship-age findings.
+      // Cross-space from a shell is the environment's job (AGENT_BUS_PROJECT).
+      case "monitor":
+        return say(callTool("monitor", {}));
       // The spine's Review stage from a shell — same verdict, same refusals.
       case "review": {
         const [taskId, verdict, ...n] = rest;
@@ -3330,6 +3371,7 @@ function printHelp(say) {
   say("                      turn a DRAFT brief into queued work (the dispatch)");
   say("  publish <version> <what...>");
   say("                      record that a build shipped");
+  say("  monitor             the rate + stuck tasks + unreviewed + ship age, this space");
   say("  projects | project_add <name> <root> | project_remove <name>");
   say("                      the app spaces this bus serves (hub Spaces bar)");
   say("  open [port]         the dashboard, plus its own chromeless window");

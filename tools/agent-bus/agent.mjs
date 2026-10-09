@@ -38,6 +38,7 @@ import {
 import { LIVE_MS, readSessions } from "./sessions.mjs";
 import { dueForNudge } from "./token-watch.mjs";
 import { checkHealth } from "./health.mjs";
+import { monitorFindings } from "./monitor.mjs";
 
 const NAME = process.env.HUB_AGENT_NAME || "hub";
 const POLL_MS = Math.max(500, Number(process.env.HUB_AGENT_POLL_MS) || 5000);
@@ -406,6 +407,15 @@ const caretakerOwnerOf = (finding, state) => {
     const entry = (state.board ?? {})[finding.subject];
     return entry?.by && state.agents[entry.by] ? entry.by : null;
   }
+  // monitor's kinds. long-running routes to the claim's runner exactly like
+  // stale-runner does — same owner when the task wears running. The other
+  // two are ownerless BY DESIGN (docs/monitoring.md): a done task nobody has
+  // reviewed and a publish that has not happened await the HUMAN gate, and
+  // the human gate is not the caretaker's inbox — the note is the record.
+  if (finding.kind === "long-running") {
+    const task = (state.tasks ?? []).find((t) => t.id === finding.subject);
+    return task?.runner && state.agents[task.runner] ? task.runner : null;
+  }
   return null;
 };
 
@@ -415,7 +425,13 @@ export function runCaretaker(log) {
   const nowIso = now.toISOString();
   withState((state) => {
     const seen = (state.caretakerSeen ||= {}); // key -> {detectedAt, filedAt}
-    const findings = checkHealth(state, { now: now.getTime() });
+    // One union, one table: the monitor contract (docs/monitoring.md) adds
+    // three kinds — long-running, unreviewed-done, no-ship — to health's
+    // five, and the dedupe/clear/routing machinery treats them identically.
+    const findings = [
+      ...checkHealth(state, { now: now.getTime() }),
+      ...monitorFindings(state, { now: now.getTime() }),
+    ];
     const live = new Set();
 
     for (const f of findings) {
